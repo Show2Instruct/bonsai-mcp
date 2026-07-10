@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a problem with Bonsai MCP
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. The `bonsai-mcp doctor` output below is the single
+        most useful thing for triage, so please include it.
+  - type: textarea
+    id: doctor
+    attributes:
+      label: bonsai-mcp doctor output
+      description: Run `uv run bonsai-mcp doctor` from your clone (with Blender and the bridge running) and paste the full output.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "e.g. Windows 11, macOS 14, Ubuntu 24.04"
+    validations:
+      required: true
+  - type: input
+    id: blender
+    attributes:
+      label: Blender version
+      placeholder: "e.g. 4.2.1"
+    validations:
+      required: true
+  - type: input
+    id: bonsai
+    attributes:
+      label: Bonsai / IfcOpenShell version
+      placeholder: "e.g. Bonsai 0.8.0, or 'not installed'"
+  - type: input
+    id: client
+    attributes:
+      label: MCP client
+      placeholder: "e.g. Claude Desktop, Cursor, Claude Code, VS Code"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "bonsai-mcp": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/bonsai-mcp", "bonsai-mcp"],
+      "env": {
+        "BONSAI_MCP_HOST": "127.0.0.1",
+        "BONSAI_MCP_PORT": "9878",
+        "BONSAI_MCP_TIMEOUT": "30"
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+site_name: Bonsai MCP
+site_description: Local MCP server bridging AI clients to Blender + Bonsai (BlenderBIM).
+repo_url: https://github.com/show2instruct/bonsai-mcp
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - content.code.copy
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Clients: clients.md
+  - Tools: tools.md
+  - Safety: safety.md
+  - Troubleshooting: troubleshooting.md
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences
+  - pymdownx.details
+  - toc:
+      permalink: true

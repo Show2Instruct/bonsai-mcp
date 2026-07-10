@@ -1,0 +1,81 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bonsai-mcp"
+version = "0.1.0"
+description = "Local MCP server bridging Claude, Cursor, VS Code, and other MCP clients to a running Blender + Bonsai (BlenderBIM) session."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Show2Instruct" }]
+keywords = ["mcp", "blender", "bonsai", "blenderbim", "ifc", "ifcopenshell", "claude"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "mcp>=1.7.0",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.4",
+]
+docs = [
+    "mkdocs>=1.5",
+    "mkdocs-material>=9.4",
+]
+
+[project.scripts]
+bonsai-mcp = "bonsai_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/show2instruct/bonsai-mcp"
+Source = "https://github.com/show2instruct/bonsai-mcp"
+Documentation = "https://github.com/show2instruct/bonsai-mcp"
+Issues = "https://github.com/show2instruct/bonsai-mcp/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bonsai_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/bonsai_mcp",
+    "blender_addon",
+    "docs",
+    "examples",
+    "scripts",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "mkdocs.yml",
+    "pyproject.toml",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra -q"
