@@ -108,18 +108,26 @@ path to your clone.
 
 ## Tools
 
-Eight tools, each tagged `[QUERY]` (read-only) or `[EDIT]` (mutates state).
+Eleven tools, each tagged `[QUERY]` (read-only) or `[EDIT]` (mutates state).
 
 | Category | Tool                      | Purpose                                                     |
 | -------- | ------------------------- | ----------------------------------------------------------- |
-| QUERY    | `get_scene_info`          | Scene summary plus an optional filtered object list.        |
-| QUERY    | `get_selected_objects`    | Per-object info for the current selection.                  |
-| QUERY    | `get_psets`               | IFC property and quantity sets for one or many objects.     |
-| QUERY    | `get_viewport_screenshot` | Capture the viewport (aim with `view`/`fit`), plus structured viewport state. |
+| QUERY    | `get_scene_info`          | Scene summary plus an optional filtered object list (paged). |
+| QUERY    | `get_selected_objects`    | Per-object info for the current selection (capped).         |
+| QUERY    | `list_elements`           | IFC-backed elements filtered by class (inheritance-aware), name, or storey; paged. |
+| QUERY    | `get_psets`               | IFC property and quantity sets for one or many objects (paged batches). |
+| QUERY    | `get_viewport_screenshot` | Capture the viewport: `view` or `azimuth`/`elevation`, direction-aware `fit`, per-storey floor plans, shading incl. color-by-class, plus structured viewport state with depth. |
 | QUERY    | `get_ifc_project_info`    | Schema, counts, materials, classifications.                 |
+| QUERY    | `get_spatial_structure`   | Site -> building -> storey -> space tree with element counts. |
+| QUERY    | `get_quantities`          | Quantity takeoff (areas, volumes, lengths) by class, optionally per storey. |
 | EDIT     | `execute_ifc_code`        | Run IfcOpenShell / Bonsai API code. `bpy` blocked.          |
 | EDIT     | `execute_blender_code`    | Run arbitrary Python with full `bpy` access.                |
 | EDIT     | `save_ifc_file`           | Save in place, save-as (guarded), and optional viewport reload. |
+
+Every tool returns structured content alongside readable JSON text, and
+the server also exposes MCP resources (`bonsai://project`,
+`bonsai://scene`, per-element psets) and two workflow prompts
+(`model-audit`, `visual-verify`).
 
 Full reference with inputs, outputs, and examples: [`docs/tools.md`](docs/tools.md).
 

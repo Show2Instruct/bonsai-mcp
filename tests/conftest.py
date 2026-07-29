@@ -18,9 +18,7 @@ class FakeBlenderBridgeClient(BlenderBridgeClient):
         responses: dict[str, Any] | None = None,
         on_send: Callable[[str, dict[str, Any]], Any] | None = None,
     ) -> None:
-        self.host = "127.0.0.1"
-        self.port = 0
-        self.timeout = 1.0
+        super().__init__(host="127.0.0.1", port=0, timeout=1.0, token="")
         self._responses = responses or {}
         self._on_send = on_send
         self.calls: list[tuple[str, dict[str, Any]]] = []

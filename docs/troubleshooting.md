@@ -27,10 +27,15 @@ Exit code `0` means the bridge is healthy, `1` means it is unreachable.
 A version mismatch is a warning, not a failure: `doctor` still exits
 `0` so it works in scripts.
 
+For scripting and CI, `doctor --json` prints a machine-readable report
+(`reachable`, `bridge` info, `version_skew`, `error`) with the same exit
+codes.
+
 ## "Cannot reach Blender bridge at 127.0.0.1:9878"
 
-The MCP server connects to the bridge per request and that connection
-was refused. Check, in order:
+The MCP server keeps one connection open to the bridge (reconnecting
+transparently when it goes stale) and this connection attempt was
+refused. Check, in order:
 
 1. Blender is running.
 2. The **Bonsai MCP Bridge** add-on is enabled.
@@ -123,6 +128,43 @@ The bridge dispatches work on Blender's main thread via a timer. If
 Blender's UI itself is frozen (e.g. a long modal dialog, a slow
 operator), the timer won't tick and requests will queue. Bring
 Blender's UI back to a responsive state and the queue will drain.
+
+If a request waits too long, the bridge cancels it and replies with a
+timeout error; a request whose client disconnected before it ran is
+cancelled and never executed.
+
+## "Unknown command" errors after updating
+
+The server and the add-on ship together but are deployed separately. If a
+tool fails with an "Unknown command" error (the message includes a
+redeploy hint), the add-on inside Blender predates the server: copy the
+current `blender_addon/bonsai_bridge.py` over the installed one (or
+reinstall the add-on zip), then restart the bridge. `doctor` warns about
+version skew explicitly.
+
+## "Invalid or missing bridge token"
+
+The add-on has a token configured in its preferences and the client did
+not send the matching secret. Set `BONSAI_MCP_TOKEN` in the MCP server's
+environment (see [Clients](clients.md)) to the same value. Token changes
+in the add-on preferences apply on the next bridge start.
+
+## Writing your own client for the bridge port
+
+The port speaks length-prefixed JSON (4-byte big-endian length + UTF-8
+JSON object). A request may carry an optional integer `id`, which the
+bridge echoes back in the response so pipelined clients can correlate
+replies (and an optional `token` when the add-on requires one). Two rules
+for custom clients:
+
+- Keep the connection open until you have read the reply. The bridge
+  treats end-of-stream from the client as "the client is gone" and
+  cancels the request if it has not started yet (a half-close via
+  `shutdown(SHUT_WR)` after sending is tolerated: an in-flight result is
+  still delivered, but a request that is still queued when the
+  half-close is noticed gets a cancellation error instead of a result).
+- Malformed input (an oversized frame, a non-JSON body) gets one framed
+  error reply, then the bridge closes the connection.
 
 ## Modifying behaviour
 

@@ -13,8 +13,10 @@ with full `bpy` access. That means anything that connects to the bridge can:
 - run shell commands via `subprocess` or `os.system`,
 - modify or destroy your Blender scene and any loaded IFC project.
 
-The bridge has **no authentication**. The only protection is that it binds to
-`127.0.0.1`, so only processes on your local machine can connect.
+By default the bridge has **no authentication**. The primary protection is
+that it binds to `127.0.0.1`, so only processes on your local machine can
+connect. An optional shared-secret token (below) hardens shared machines,
+but does not change the loopback-only stance.
 
 ### `execute_ifc_code` is not a safe subset
 
@@ -43,6 +45,34 @@ trust level as `execute_blender_code`.
    on prompts from untrusted sources (web content, third-party documents,
    and so on).
 
+## Read-only mode
+
+The add-on has an **Allow edits** toggle (sidebar panel and add-on
+preferences, on by default). When it is off, the bridge rejects the three
+EDIT commands (`execute_ifc_code`, `execute_blender_code`, `save_ifc_file`)
+with a clear error before they run, while QUERY tools and screenshots keep
+working.
+
+This is a guard against *unwanted tool use*, not a sandbox: it blocks code
+execution entirely rather than trying to prove that a given script is
+read-only. It is enforced in one place (the command dispatcher on Blender's
+main thread), so a client cannot bypass it by crafting requests.
+
+## Optional shared-secret token
+
+On a single-user machine, loopback-only is the documented trust model. On a
+shared machine, loopback is not a user boundary: any local process of any
+user can connect to `127.0.0.1:9878`.
+
+For that case the add-on preferences have a **Token** field. When set,
+every bridge request must carry the same token or it is rejected before
+anything runs (constant-time comparison). On the client side, set
+`BONSAI_MCP_TOKEN` to the same value in the MCP server's environment.
+
+The token is snapshotted when the bridge starts, so changing the
+preference requires a bridge restart to take effect. `bonsai-mcp doctor`
+reports whether the bridge requires a token. Off by default.
+
 ## What the server tries to do safely
 
 - Binds to loopback only by default.
@@ -51,9 +81,14 @@ trust level as `execute_blender_code`.
   Blender crash.
 - Caps the per-tick command processing inside Blender so the UI stays
   responsive even if many requests queue up.
+- Cancels queued requests when the client disconnects or times out, so a
+  command the client was told failed does not silently run later and mutate
+  the scene anyway.
+- Optional read-only mode (see above).
 
 ## What it does **not** do
 
-- No sandboxing of `execute_blender_code`.
+- No sandboxing of `execute_blender_code` (an out-of-process worker for
+  `execute_ifc_code` is planned for a future release).
 - No rate limiting.
-- No authentication.
+- No authentication unless the optional token is configured.

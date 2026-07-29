@@ -200,6 +200,80 @@ def test_doctor_reports_unreachable_bridge():
     assert "Bonsai MCP" in out
 
 
+def test_doctor_reports_token_requirement():
+    client = FakeBlenderBridgeClient(
+        responses={
+            "ping": {
+                "status": "ok",
+                "blender_version": "4.2.1",
+                "ifcopenshell_available": True,
+                "ifc_loaded": True,
+                "token_required": True,
+            }
+        }
+    )
+    buf = io.StringIO()
+    run_doctor(client, stream=buf)
+    out = buf.getvalue()
+    assert "BONSAI_MCP_TOKEN" in out
+    assert "extras" not in out  # token_required has a first-party line, not an extra
+
+
+class TestDoctorJson:
+    _PING = {
+        "status": "ok",
+        "service": "bonsai-mcp-bridge",
+        "blender_version": "4.2.1",
+        "ifcopenshell_available": True,
+        "ifc_loaded": True,
+        "requests_served": 12,
+    }
+
+    def test_reachable(self):
+        import json
+
+        from bonsai_mcp import __version__
+
+        info = dict(self._PING)
+        info["addon_version"] = __version__
+        client = FakeBlenderBridgeClient(responses={"ping": info})
+        buf = io.StringIO()
+        assert run_doctor(client, stream=buf, as_json=True) == 0
+        report = json.loads(buf.getvalue())
+        assert report["reachable"] is True
+        assert report["version_skew"] is False
+        assert report["bridge"]["requests_served"] == 12
+        assert report["server_version"] == __version__
+
+    def test_unreachable(self):
+        import json
+
+        client = FakeBlenderBridgeClient(
+            responses={"ping": BlenderBridgeError("Cannot reach Blender bridge")}
+        )
+        buf = io.StringIO()
+        assert run_doctor(client, stream=buf, as_json=True) == 1
+        report = json.loads(buf.getvalue())
+        assert report["reachable"] is False
+        assert "Cannot reach" in report["error"]
+
+    def test_version_skew_flagged(self):
+        import json
+
+        info = dict(self._PING)
+        info["addon_version"] = "0.0.9"
+        client = FakeBlenderBridgeClient(responses={"ping": info})
+        buf = io.StringIO()
+        run_doctor(client, stream=buf, as_json=True)
+        report = json.loads(buf.getvalue())
+        assert report["version_skew"] is True
+
+    def test_json_flag_parses(self):
+        parser = build_parser()
+        args = parser.parse_args(["doctor", "--json"])
+        assert args.json is True
+
+
 @pytest.mark.parametrize("flag", ["--help", "-h"])
 def test_cli_help_does_not_exit_with_error(flag, capsys):
     parser = build_parser()

@@ -122,3 +122,4 @@ with empty `args`.
 | `BONSAI_MCP_HOST` | `127.0.0.1` | Bridge host the MCP server connects to. |
 | `BONSAI_MCP_PORT` | `9878` | Bridge TCP port. |
 | `BONSAI_MCP_TIMEOUT` | `30` | Seconds to wait for a single tool call. |
+| `BONSAI_MCP_TOKEN` | (unset) | Shared secret, only needed when the add-on preferences have a token configured (see [Safety](safety.md)). |

@@ -67,7 +67,7 @@ wheels = [
 
 [[package]]
 name = "bonsai-mcp"
-version = "0.1.0"
+version = "1.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
@@ -87,7 +87,7 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", specifier = ">=1.7.0" },
+    { name = "mcp", specifier = ">=1.27,<2" },
     { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.5" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.4" },
     { name = "pydantic", specifier = ">=2.0" },

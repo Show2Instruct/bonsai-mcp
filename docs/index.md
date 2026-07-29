@@ -11,12 +11,17 @@ non-loopback interface.
 
 ## At a glance
 
-- 8 tools, split into 5 QUERY (read-only) and 3 EDIT (mutating)
+- 11 tools, split into 8 QUERY (read-only) and 3 EDIT (mutating)
   operations. The category appears as a `[QUERY]` or `[EDIT]` prefix
-  in every tool description and via MCP's `Tool.annotations.readOnlyHint`.
+  in every tool description and via MCP's `Tool.annotations` hints.
+- BIM-native queries with no code execution needed: spatial hierarchy,
+  quantity takeoff, inheritance-aware element listing, psets.
+- Structured tool output, MCP resources, and workflow prompts on top of
+  the plain-text results.
 - Two moving parts: a Python MCP server (this package) plus a Blender
   add-on that runs inside Blender.
-- Talks over `127.0.0.1` only, with a length-prefixed JSON protocol.
+- Talks over `127.0.0.1` only, with a length-prefixed JSON protocol on a
+  persistent connection; optional shared-secret token for shared machines.
 - Built directly on the official `mcp` Python SDK and Pydantic, with no
   bespoke framework dependency.
 
