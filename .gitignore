@@ -19,3 +19,6 @@ site/
 *.log
 *.tmp
 dev/
+CLAUDE.md
+.mcp.json
+.claude/

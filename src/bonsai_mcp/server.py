@@ -6,15 +6,42 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import sys
 from typing import Any
 
 from mcp.server import Server
+from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.server.stdio import stdio_server
-from mcp.types import ImageContent, TextContent, Tool, ToolAnnotations
+from mcp.types import (
+    GetPromptResult,
+    ImageContent,
+    Prompt,
+    PromptArgument,
+    PromptMessage,
+    Resource,
+    ResourceTemplate,
+    TextContent,
+    Tool,
+    ToolAnnotations,
+)
+from pydantic import AnyUrl, BaseModel, ConfigDict
 
 from bonsai_mcp import __version__
 from bonsai_mcp.blender_client import BlenderBridgeClient, BlenderBridgeError
+from bonsai_mcp.schemas import (
+    ExecuteCodeInput,
+    ExecuteIfcCodeInput,
+    GetPsetsInput,
+    GetQuantitiesInput,
+    GetSceneInfoInput,
+    GetSelectedObjectsInput,
+    GetSpatialStructureInput,
+    ListElementsInput,
+    SaveIfcInput,
+    ViewportScreenshotInput,
+    input_schema_for,
+)
 from bonsai_mcp.tools import (
     ALL_TOOL_NAMES,
     EDIT_TOOL_NAMES,
@@ -23,17 +50,25 @@ from bonsai_mcp.tools import (
     TOOL_EXECUTE_IFC_CODE,
     TOOL_GET_IFC_PROJECT_INFO,
     TOOL_GET_PSETS,
+    TOOL_GET_QUANTITIES,
     TOOL_GET_SCENE_INFO,
     TOOL_GET_SELECTED_OBJECTS,
+    TOOL_GET_SPATIAL_STRUCTURE,
     TOOL_GET_VIEWPORT_SCREENSHOT,
+    TOOL_LIST_ELEMENTS,
     TOOL_SAVE_IFC_FILE,
+    ToolError,
+    _as_json,
     tool_execute_blender_code,
     tool_execute_ifc_code,
     tool_get_ifc_project_info,
     tool_get_psets,
+    tool_get_quantities,
     tool_get_scene_info,
     tool_get_selected_objects,
+    tool_get_spatial_structure,
     tool_get_viewport_screenshot,
+    tool_list_elements,
     tool_save_ifc_file,
 )
 
@@ -41,280 +76,319 @@ logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="[bonsai-mcp] 
 log = logging.getLogger("bonsai-mcp")
 
 
-def _query_tool(name: str, description: str, input_schema: dict) -> Tool:
-    """Build a Tool definition flagged as read-only (QUERY)."""
-    return Tool(
-        name=name,
-        description=f"[QUERY] {description}",
-        inputSchema=input_schema,
-        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
-    )
+class _EmptyInput(BaseModel):
+    """No parameters."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
-def _edit_tool(
-    name: str,
-    description: str,
-    input_schema: dict,
-    *,
-    destructive: bool = True,
-) -> Tool:
-    """Build a Tool definition flagged as a write/edit operation (EDIT)."""
-    return Tool(
-        name=name,
-        description=f"[EDIT] {description}",
-        inputSchema=input_schema,
-        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=destructive),
-    )
+def _output_schema(description: str, properties: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A deliberately loose result schema.
+
+    Bridge payloads evolve between add-on versions; the properties listed
+    here are hints for clients, not a validation contract, so nothing is
+    required and unknown keys are allowed.
+    """
+    schema: dict[str, Any] = {
+        "type": "object",
+        "description": description,
+        "additionalProperties": True,
+    }
+    if properties:
+        schema["properties"] = properties
+    return schema
+
+
+_PAGED_LIST_PROPS: dict[str, Any] = {
+    "total": {"type": "integer"},
+    "truncated": {"type": "boolean"},
+}
+
+_EXEC_OUTPUT_PROPS: dict[str, Any] = {
+    "success": {"type": "boolean"},
+    "stdout": {"type": "string"},
+    "stderr": {"type": "string"},
+    "error": {"type": ["string", "null"]},
+    "traceback": {"type": ["string", "null"]},
+}
+
+# (name, title, kind, input model, description, output schema, idempotent)
+_TOOL_SPECS: tuple[tuple[str, str, str, type[BaseModel], str, dict[str, Any], bool], ...] = (
+    (
+        TOOL_GET_SCENE_INFO,
+        "Get Scene Info",
+        "QUERY",
+        GetSceneInfoInput,
+        (
+            "Return a summary of the current Blender scene (scene name, "
+            "object count, selection, collections, IFC availability). When "
+            "`query` is supplied, the response also includes an `objects` "
+            "list filtered by the query, paged via limit/offset. Supported "
+            "queries: 'all', 'selected', 'walls', 'doors', 'windows', "
+            "'spaces', 'slabs', 'columns', 'beams', 'roofs', 'stairs', "
+            "'by_class', 'by_name', 'by_global_id'. For structured element "
+            "listings prefer the dedicated list_elements tool."
+        ),
+        _output_schema(
+            "Scene summary, plus objects/objects_total/objects_truncated when a query is given.",
+            {
+                "scene_name": {"type": "string"},
+                "object_count": {"type": "integer"},
+                "objects": {"type": "array"},
+                "objects_total": {"type": "integer"},
+                "objects_truncated": {"type": "boolean"},
+            },
+        ),
+        True,
+    ),
+    (
+        TOOL_GET_SELECTED_OBJECTS,
+        "Get Selected Objects",
+        "QUERY",
+        GetSelectedObjectsInput,
+        (
+            "Return name, type, location, dimensions, and (if available) "
+            "IFC class and GlobalId for each currently selected object. "
+            "Results are capped by `limit` with total/truncated reported."
+        ),
+        _output_schema(
+            "Selected object summaries.",
+            {"objects": {"type": "array"}, **_PAGED_LIST_PROPS},
+        ),
+        True,
+    ),
+    (
+        TOOL_LIST_ELEMENTS,
+        "List Elements",
+        "QUERY",
+        ListElementsInput,
+        (
+            "List IFC-backed elements in the scene with structured filters: "
+            "`ifc_class` (inheritance-aware, so 'IfcWall' matches "
+            "IfcWallStandardCase), `name_contains`, and `storey` (Name or "
+            "GlobalId of an IfcBuildingStorey). Paged via limit/offset with "
+            "total/truncated reported. Prefer this over get_scene_info "
+            "queries for element listings."
+        ),
+        _output_schema(
+            "Matching element summaries.",
+            {"elements": {"type": "array"}, **_PAGED_LIST_PROPS},
+        ),
+        True,
+    ),
+    (
+        TOOL_GET_PSETS,
+        "Get Property Sets",
+        "QUERY",
+        GetPsetsInput,
+        (
+            "Return IFC property sets (psets) and quantity sets (qtos) for "
+            "one or more objects. Accepts any mix of `global_ids` and "
+            "`names` lists (Blender object names). Large batches are paged "
+            "(limit/offset, with targets_total/truncated/next_offset in the "
+            "response). The response preserves input order in a `results` "
+            "list."
+        ),
+        _output_schema(
+            "Per-target pset/qto results with paging metadata.",
+            {
+                "results": {"type": "array"},
+                "targets_total": {"type": "integer"},
+                "truncated": {"type": "boolean"},
+                "next_offset": {"type": "integer"},
+            },
+        ),
+        True,
+    ),
+    (
+        TOOL_GET_VIEWPORT_SCREENSHOT,
+        "Get Viewport Screenshot",
+        "QUERY",
+        ViewportScreenshotInput,
+        (
+            "Capture the Blender 3D viewport and return the image inline. "
+            "Optionally aim the viewport first: `view` sets the direction "
+            "(top/bottom/front/back/left/right = orthographic axis views, "
+            "'iso' = perspective isometric, 'camera' = scene camera), or use "
+            "`azimuth`/`elevation` degrees for arbitrary directions. `fit` "
+            "frames the content ('all' or 'selected') with direction-aware "
+            "tightening. `storey` isolates one building storey for the shot "
+            "(floor plans: storey + view='top' + fit='all'). `shading` "
+            "overrides viewport shading; 'class_colors' colors objects by "
+            "IFC class and returns a legend. Overlays are hidden by default. "
+            "The render is downscaled so the longest edge fits `max_size` "
+            "(default 800 px, also capped by the native viewport resolution) "
+            "and encoded as JPEG by default; an oversized PNG request is "
+            "automatically downgraded to JPEG rather than failing after the "
+            "render. Scene render settings, shading, overlays, and "
+            "visibility are restored afterwards; the viewport orientation "
+            "persists."
+        ),
+        _output_schema(
+            "Screenshot metadata and viewport state (pixels arrive as an image content block).",
+            {
+                "format": {"type": "string"},
+                "width": {"type": "integer"},
+                "height": {"type": "integer"},
+                "viewport": {"type": "object"},
+                "class_legend": {"type": "object"},
+                "note": {"type": "string"},
+            },
+        ),
+        True,
+    ),
+    (
+        TOOL_GET_IFC_PROJECT_INFO,
+        "Get IFC Project Info",
+        "QUERY",
+        _EmptyInput,
+        (
+            "Return IFC schema, project name, counts of sites/buildings/"
+            "storeys, counts of common IFC entities, and material and "
+            "classification summaries. Returns a clear error if no IFC "
+            "project is loaded."
+        ),
+        _output_schema(
+            "Project-level IFC summary.",
+            {
+                "schema": {"type": "string"},
+                "project_name": {"type": ["string", "null"]},
+                "entity_counts": {"type": "object"},
+            },
+        ),
+        True,
+    ),
+    (
+        TOOL_GET_SPATIAL_STRUCTURE,
+        "Get Spatial Structure",
+        "QUERY",
+        GetSpatialStructureInput,
+        (
+            "Return the project's spatial hierarchy as a tree: IfcProject -> "
+            "IfcSite -> IfcBuilding -> IfcBuildingStorey -> IfcSpace, with "
+            "names, GlobalIds, storey elevations, and (optionally) counts of "
+            "contained elements by IFC class. Answers 'what is in this "
+            "building, storey by storey' without any code execution."
+        ),
+        _output_schema(
+            "Spatial hierarchy tree.",
+            {"schema": {"type": "string"}, "tree": {"type": "object"}},
+        ),
+        True,
+    ),
+    (
+        TOOL_GET_QUANTITIES,
+        "Get Quantities",
+        "QUERY",
+        GetQuantitiesInput,
+        (
+            "Quantity takeoff: aggregate IFC base quantities (areas, "
+            "volumes, lengths, counts) grouped by IFC class, optionally "
+            "broken down per building storey. Sums every numeric quantity "
+            "found in each element's quantity sets (e.g. walls' NetSideArea, "
+            "slabs' GrossVolume) and reports how many elements carried each "
+            "quantity. Answers 'how much wall area / slab volume is in this "
+            "model' without any code execution."
+        ),
+        _output_schema(
+            "Aggregated quantities per IFC class.",
+            {
+                "classes": {"type": "object"},
+                "by_storey": {"type": "object"},
+                "units": {"type": "object"},
+            },
+        ),
+        True,
+    ),
+    (
+        TOOL_EXECUTE_IFC_CODE,
+        "Execute IFC Code",
+        "EDIT",
+        ExecuteIfcCodeInput,
+        (
+            "PREFERRED code execution tool. Runs IfcOpenShell / Bonsai API "
+            "code with a pre-injected IFC namespace. bpy access is BLOCKED; "
+            "use execute_blender_code only when you genuinely need Blender "
+            "operations (viewport, rendering, object transforms). "
+            "Pre-injected variables: `ifc` (the loaded IFC file or None), "
+            "`ifcopenshell`, `ifc_api` (ifcopenshell.api), "
+            "`element_util` (ifcopenshell.util.element), "
+            "`tool` (bonsai.tool). Pre-injected helper functions: "
+            "`get_ifc_file()` (loaded IFC file or raises), "
+            "`get_default_container()` (active spatial container), "
+            "`save_and_load_ifc(path=None)` (save the project and reload "
+            "it; call this after IFC edits to make them visible in the "
+            "viewport, since edits do NOT appear until the project is reloaded). "
+            "Use this for: querying IFC entities, reading/writing "
+            "properties, traversing the IFC model, calling "
+            "ifcopenshell.api operations, and any BIM data work."
+        ),
+        _output_schema("Execution outcome with captured output.", _EXEC_OUTPUT_PROPS),
+        False,
+    ),
+    (
+        TOOL_EXECUTE_BLENDER_CODE,
+        "Execute Blender Code",
+        "EDIT",
+        ExecuteCodeInput,
+        (
+            "Run arbitrary Python code inside Blender with full bpy access. "
+            "Use ONLY when you need Blender-specific operations (viewport "
+            "manipulation, rendering, object transforms, modifiers). "
+            "For IFC/BIM data operations, ALWAYS prefer execute_ifc_code. "
+            "LOCAL TRUSTED USE ONLY."
+        ),
+        _output_schema("Execution outcome with captured output.", _EXEC_OUTPUT_PROPS),
+        False,
+    ),
+    (
+        TOOL_SAVE_IFC_FILE,
+        "Save IFC File",
+        "EDIT",
+        SaveIfcInput,
+        (
+            "Save the loaded IFC model. With no arguments it saves the "
+            "project back to its own file (in-place, like File > Save IFC). "
+            "Pass `output_path` for a save-as; that refuses to overwrite "
+            "existing files unless `overwrite=true`. Pass `reload=true` to "
+            "reload the project from the saved file afterwards, which "
+            "rebuilds the Blender scene so IFC-level edits become visible "
+            "in the viewport."
+        ),
+        _output_schema(
+            "Save outcome.",
+            {
+                "saved": {"type": "boolean"},
+                "output_path": {"type": "string"},
+                "reloaded": {"type": "boolean"},
+            },
+        ),
+        True,
+    ),
+)
 
 
 def _tool_definitions() -> list[Tool]:
-    """Static MCP tool definitions. Schemas use plain JSON Schema (no Pydantic refs)."""
-    return [
-        _query_tool(
-            TOOL_GET_SCENE_INFO,
-            description=(
-                "Return a summary of the current Blender scene (scene name, "
-                "object count, selection, collections, IFC availability). When "
-                "`query` is supplied, the response also includes an `objects` "
-                "list filtered by the query. Supported queries: 'all', "
-                "'selected', 'walls', 'doors', 'windows', 'spaces', 'slabs', "
-                "'columns', 'beams', 'roofs', 'stairs', 'by_class', 'by_name', "
-                "'by_global_id'."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Optional object filter. Omit for scene summary only.",
-                    },
-                    "ifc_class": {"type": "string"},
-                    "name": {"type": "string"},
-                    "global_id": {"type": "string"},
-                },
-                "additionalProperties": False,
-            },
-        ),
-        _query_tool(
-            TOOL_GET_SELECTED_OBJECTS,
-            description=(
-                "Return name, type, location, dimensions, and (if available) "
-                "IFC class and GlobalId for each currently selected object."
-            ),
-            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-        ),
-        _query_tool(
-            TOOL_GET_PSETS,
-            description=(
-                "Return IFC property sets (psets) and quantity sets (qtos) for "
-                "one or more objects. Accepts any mix of `global_ids` and "
-                "`names` lists (Blender object names). Up to 100 targets per "
-                "call. The response preserves input order in a `results` list."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "global_ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
-                    "names": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
-                },
-                "additionalProperties": False,
-            },
-        ),
-        _query_tool(
-            TOOL_GET_VIEWPORT_SCREENSHOT,
-            description=(
-                "Capture the Blender 3D viewport and return the image inline. "
-                "Optionally aim the viewport first: `view` sets the direction "
-                "(top/bottom/front/back/left/right = orthographic axis views, "
-                "'iso' = perspective isometric, 'camera' = scene camera) and "
-                "`fit` frames the content ('all' or 'selected'). The render is "
-                "downscaled so the longest edge fits `max_size` (default 800 "
-                "px) and encoded as JPEG by default, keeping the response "
-                "safely under MCP size limits. Scene render settings are "
-                "restored afterwards; the viewport orientation persists."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "max_size": {
-                        "type": "integer",
-                        "default": 800,
-                        "minimum": 64,
-                        "maximum": 2048,
-                        "description": (
-                            "Longest image edge in pixels. The render is only "
-                            "downscaled, never upscaled. Values above ~1200 with "
-                            "format='png' may exceed the response size cap."
-                        ),
-                    },
-                    "format": {
-                        "type": "string",
-                        "enum": ["jpeg", "png"],
-                        "default": "jpeg",
-                        "description": "'jpeg' (default, small) or 'png' (lossless, large).",
-                    },
-                    "quality": {
-                        "type": "integer",
-                        "default": 85,
-                        "minimum": 1,
-                        "maximum": 100,
-                        "description": "JPEG quality. Ignored for png.",
-                    },
-                    "view": {
-                        "type": "string",
-                        "enum": [
-                            "top",
-                            "bottom",
-                            "front",
-                            "back",
-                            "left",
-                            "right",
-                            "iso",
-                            "camera",
-                        ],
-                        "description": (
-                            "Aim the viewport before capturing. Axis names give "
-                            "orthographic views; 'iso' a perspective isometric; "
-                            "'camera' the scene camera. Omit to keep the current "
-                            "orientation."
-                        ),
-                    },
-                    "fit": {
-                        "type": "string",
-                        "enum": ["all", "selected"],
-                        "description": (
-                            "Frame content before capturing: 'all' = everything, "
-                            "'selected' = current selection. Combines with view."
-                        ),
-                    },
-                    "include_objects": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": (
-                            "Also return, as text, screen-space 2D bounding "
-                            "boxes keyed by GlobalId for objects in frame "
-                            "(normalized 0-1, origin top-left). Use this for "
-                            "spatial reasoning when the image channel is "
-                            "unavailable or for grounding what the image shows."
-                        ),
-                    },
-                    "max_objects": {
-                        "type": "integer",
-                        "default": 50,
-                        "minimum": 1,
-                        "maximum": 200,
-                        "description": (
-                            "Cap for include_objects; largest boxes are kept."
-                        ),
-                    },
-                },
-                "additionalProperties": False,
-            },
-        ),
-        _query_tool(
-            TOOL_GET_IFC_PROJECT_INFO,
-            description=(
-                "Return IFC schema, project name, counts of sites/buildings/"
-                "storeys, counts of common IFC entities, and material and "
-                "classification summaries. Returns a clear error if no IFC "
-                "project is loaded."
-            ),
-            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-        ),
-        _edit_tool(
-            TOOL_EXECUTE_IFC_CODE,
-            description=(
-                "PREFERRED code execution tool. Runs IfcOpenShell / Bonsai API "
-                "code with a pre-injected IFC namespace. bpy access is BLOCKED; "
-                "use execute_blender_code only when you genuinely need Blender "
-                "operations (viewport, rendering, object transforms). "
-                "Pre-injected variables: `ifc` (the loaded IFC file or None), "
-                "`ifcopenshell`, `ifc_api` (ifcopenshell.api), "
-                "`element_util` (ifcopenshell.util.element), "
-                "`tool` (bonsai.tool). Pre-injected helper functions: "
-                "`get_ifc_file()` (loaded IFC file or raises), "
-                "`get_default_container()` (active spatial container), "
-                "`save_and_load_ifc(path=None)` (save the project and reload "
-                "it; call this after IFC edits to make them visible in the "
-                "viewport, since edits do NOT appear until the project is reloaded). "
-                "Use this for: querying IFC entities, reading/writing "
-                "properties, traversing the IFC model, calling "
-                "ifcopenshell.api operations, and any BIM data work."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": (
-                            "Python source using IfcOpenShell/Bonsai APIs. "
-                            "bpy imports are rejected."
-                        ),
-                    }
-                },
-                "required": ["code"],
-                "additionalProperties": False,
-            },
-        ),
-        _edit_tool(
-            TOOL_EXECUTE_BLENDER_CODE,
-            description=(
-                "Run arbitrary Python code inside Blender with full bpy access. "
-                "Use ONLY when you need Blender-specific operations (viewport "
-                "manipulation, rendering, object transforms, modifiers). "
-                "For IFC/BIM data operations, ALWAYS prefer execute_ifc_code. "
-                "LOCAL TRUSTED USE ONLY."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "code": {"type": "string", "description": "Python source to execute."}
-                },
-                "required": ["code"],
-                "additionalProperties": False,
-            },
-        ),
-        _edit_tool(
-            TOOL_SAVE_IFC_FILE,
-            description=(
-                "Save the loaded IFC model. With no arguments it saves the "
-                "project back to its own file (in-place, like File > Save IFC). "
-                "Pass `output_path` for a save-as; that refuses to overwrite "
-                "existing files unless `overwrite=true`. Pass `reload=true` to "
-                "reload the project from the saved file afterwards, which "
-                "rebuilds the Blender scene so IFC-level edits become visible "
-                "in the viewport."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "output_path": {
-                        "type": "string",
-                        "description": (
-                            "Optional save-as path. Omit to save the project to "
-                            "its own file."
-                        ),
-                    },
-                    "overwrite": {"type": "boolean", "default": False},
-                    "reload": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": (
-                            "Reload the project after saving so the viewport "
-                            "reflects IFC edits."
-                        ),
-                    },
-                },
-                "additionalProperties": False,
-            },
-        ),
-    ]
+    """MCP tool definitions; input schemas are generated from the Pydantic models."""
+    tools: list[Tool] = []
+    for name, title, kind, model, description, output, idempotent in _TOOL_SPECS:
+        is_query = kind == "QUERY"
+        tools.append(
+            Tool(
+                name=name,
+                title=title,
+                description=f"[{kind}] {description}",
+                inputSchema=input_schema_for(model),
+                outputSchema=output,
+                annotations=ToolAnnotations(
+                    readOnlyHint=is_query,
+                    destructiveHint=not is_query,
+                    idempotentHint=idempotent,
+                    openWorldHint=False,
+                ),
+            )
+        )
+    return tools
 
 
 _SERVER_INSTRUCTIONS = """\
@@ -323,12 +397,27 @@ You are connected to a Blender + Bonsai (BlenderBIM) session via Bonsai MCP.
 ## Tool categories
 
 - [QUERY] tools (read-only): `get_scene_info`, `get_selected_objects`,
-  `get_psets`, `get_viewport_screenshot`, `get_ifc_project_info`.
+  `list_elements`, `get_psets`, `get_viewport_screenshot`,
+  `get_ifc_project_info`, `get_spatial_structure`, `get_quantities`.
 - [EDIT] tools (modify state): `execute_ifc_code`, `execute_blender_code`,
   `save_ifc_file`.
 
 Reach for QUERY tools first; only use EDIT tools when the user has asked
-for a change.
+for a change. Typical BIM questions are answerable without code:
+`get_spatial_structure` for "what is in this building, storey by storey",
+`get_quantities` for areas/volumes takeoffs, `list_elements` for filtered
+element lists, `get_psets` for properties.
+
+Large result sets are paged: pass `limit`/`offset` and watch the
+`total`/`truncated` flags instead of requesting everything at once.
+
+The add-on has an "Allow edits" toggle. When it is off, EDIT tools fail
+with a clear error while QUERY tools keep working; tell the user to enable
+it in the Blender sidebar (N-panel > Bonsai MCP) if they want edits.
+
+If a tool fails with "Unknown command", the add-on inside Blender is older
+than this server: the user should redeploy blender_addon/bonsai_bridge.py
+and restart the bridge.
 
 ## IFC-first principle for EDIT work
 
@@ -341,9 +430,8 @@ for a change.
    operations: viewport manipulation, rendering, object transforms, modifiers,
    or anything that requires `bpy`.
 
-3. Use the dedicated query tools (`get_scene_info`, `get_psets`,
-   `get_ifc_project_info`) before writing code. They handle common lookups
-   without custom scripts.
+3. Use the dedicated query tools before writing code. They handle common
+   lookups without custom scripts.
 
 ## Available namespace in execute_ifc_code
 
@@ -382,13 +470,18 @@ because reloading clears and rebuilds the whole scene.
 
 `get_viewport_screenshot` downscales to `max_size` (default 800 px, JPEG).
 Request a larger `max_size` or `format='png'` only when you need detail;
-oversized results are rejected to protect the MCP response size cap.
+an oversized PNG is automatically downgraded to JPEG with a note.
 
 Aim before you shoot: pass `view` ('top', 'front', 'right', ..., 'iso',
-'camera') and/or `fit` ('all' or 'selected') to orient and frame the
-viewport in the same call, with no execute_blender_code needed. A typical
-visual-verification loop: select or edit objects, `save_ifc_file` with
-`reload=true` if you made IFC edits, then
+'camera') or `azimuth`/`elevation` degrees, and/or `fit` ('all' or
+'selected') to orient and frame the viewport in the same call. Framing is
+direction-aware, so elevations fill the frame. For a floor plan of one
+storey, pass `storey` (Name or GlobalId) with `view='top'`, `fit='all'`.
+`shading='class_colors'` colors objects by IFC class and returns a legend,
+which makes walls/slabs/doors trivially distinguishable in the image.
+
+A typical visual-verification loop: select or edit objects, `save_ifc_file`
+with `reload=true` if you made IFC edits, then
 `get_viewport_screenshot(view='iso', fit='all')`.
 
 Every screenshot response also includes structured viewport state as text
@@ -396,17 +489,152 @@ Every screenshot response also includes structured viewport state as text
 applied view is verifiable without vision. If your client does not deliver
 tool-result images to you (some MCP clients drop them; the text line
 reports how many base64 chars were attached), pass `include_objects=true`
-to get screen-space 2D bounding boxes keyed by GlobalId (`box` =
-[x_min, y_min, x_max, y_max], normalized 0-1, origin top-left, smaller y
-is higher on screen). That enables spatial reasoning entirely from text:
-containment, left/right/above/below relations, and relative sizes.
+to get screen-space 2D bounding boxes and view depths keyed by GlobalId
+(`box` = [x_min, y_min, x_max, y_max], normalized 0-1, origin top-left,
+smaller y is higher on screen; `depth` = distance from the viewpoint).
+That enables spatial reasoning entirely from text: containment,
+left/right/above/below relations, relative sizes, and near/far ordering.
 """
+
+
+_RESOURCES: tuple[tuple[str, str, str], ...] = (
+    (
+        "bonsai://project",
+        "IFC project info",
+        "IFC schema, project name, entity counts, materials, classifications.",
+    ),
+    (
+        "bonsai://scene",
+        "Blender scene summary",
+        "Scene name, object counts, selection, collections, IFC availability.",
+    ),
+)
+
+_ELEMENT_PSETS_TEMPLATE = "bonsai://element/{global_id}/psets"
+_ELEMENT_PSETS_RE = re.compile(r"^bonsai://element/([^/]+)/psets$")
+
+
+def _read_resource_payload(client: BlenderBridgeClient, uri: str) -> dict[str, Any]:
+    """Resolve a bonsai:// resource URI to its JSON payload."""
+    normalized = uri.rstrip("/")
+    if normalized == "bonsai://project":
+        return tool_get_ifc_project_info(client)
+    if normalized == "bonsai://scene":
+        return tool_get_scene_info(client, {})
+    match = _ELEMENT_PSETS_RE.match(normalized)
+    if match:
+        return tool_get_psets(client, {"global_ids": [match.group(1)]})
+    raise ValueError(f"Unknown resource URI: {uri!r}")
+
+
+_PROMPT_MODEL_AUDIT = """\
+Audit the IFC model currently open in Blender and produce a structured report.
+
+Work through these steps with the Bonsai MCP query tools (no code execution
+should be needed):
+
+1. `get_ifc_project_info`: schema, project name, entity counts, materials,
+   classifications. Note anything unusual (zero storeys, missing project name).
+2. `get_spatial_structure`: walk the site -> building -> storey -> space
+   tree. Report the storey list with elevations and the element counts per
+   storey.
+3. `get_quantities` (optionally `by_storey=true`): report wall areas, slab
+   volumes, and other available base quantities. Flag classes where many
+   elements carry no quantities (poor model quality signal).
+4. Spot-check `get_psets` on a handful of representative elements from
+   different classes and storeys{focus_clause}. Flag missing or suspicious
+   property sets (e.g. no Pset_WallCommon on walls, missing FireRating).
+5. `get_viewport_screenshot(view='iso', fit='all')` for an overview image,
+   and one `storey` floor plan per storey if the model is small enough.
+
+Finish with a concise report: model facts, quality findings ordered by
+severity, and recommended fixes. Do not modify the model.
+"""
+
+_PROMPT_VISUAL_VERIFY = """\
+Visually verify the most recent model edit{change_clause}.
+
+1. If the edit was made through `execute_ifc_code` and not yet reloaded,
+   call `save_ifc_file` with `reload=true` once (this rebuilds the scene so
+   IFC edits become visible). Skip if nothing was edited.
+2. Capture `get_viewport_screenshot(view='iso', fit='all')` for context.
+3. Capture a tighter shot of the affected area: `fit='selected'` if the
+   relevant objects are selected, a `storey` floor plan for layout changes,
+   or an elevation (`view='front'`/`'right'`) for height changes. Use
+   `shading='class_colors'` when class distinctions matter.
+4. Compare what the screenshots show against what the edit was supposed to
+   do; use `include_objects=true` boxes when the image channel is
+   unreliable. Confirm both the intended change and the absence of obvious
+   collateral damage (missing elements, displaced geometry).
+5. Report: what changed, what the screenshots confirm, and any mismatch
+   that needs a follow-up edit.
+"""
+
+_PROMPTS: tuple[Prompt, ...] = (
+    Prompt(
+        name="model-audit",
+        title="Model audit",
+        description=(
+            "Walk the loaded IFC model with the query tools (project info, "
+            "spatial tree, quantities, pset spot-checks, screenshots) and "
+            "produce a quality report."
+        ),
+        arguments=[
+            PromptArgument(
+                name="focus",
+                description="Optional focus area, e.g. 'walls', 'fire safety', 'storey 2'.",
+                required=False,
+            )
+        ],
+    ),
+    Prompt(
+        name="visual-verify",
+        title="Visual verify",
+        description=(
+            "Verify the latest edit visually: reload if needed, take "
+            "overview and detail screenshots, compare against the intent."
+        ),
+        arguments=[
+            PromptArgument(
+                name="what_changed",
+                description="Optional description of the edit to verify.",
+                required=False,
+            )
+        ],
+    ),
+)
+
+
+def _prompt_text(name: str, arguments: dict[str, str] | None) -> str:
+    args = arguments or {}
+    if name == "model-audit":
+        focus = (args.get("focus") or "").strip()
+        focus_clause = f", prioritising {focus}" if focus else ""
+        return _PROMPT_MODEL_AUDIT.format(focus_clause=focus_clause)
+    if name == "visual-verify":
+        change = (args.get("what_changed") or "").strip()
+        change_clause = f": {change}" if change else ""
+        return _PROMPT_VISUAL_VERIFY.format(change_clause=change_clause)
+    raise ValueError(f"Unknown prompt: {name!r}")
 
 
 def build_server(client: BlenderBridgeClient | None = None) -> Server:
     """Create the MCP server."""
     client = client or BlenderBridgeClient()
     server: Server = Server("bonsai-mcp", instructions=_SERVER_INSTRUCTIONS)
+
+    async def _send_progress(progress: float, message: str) -> None:
+        """Best-effort coarse progress; a no-op unless the client sent a token."""
+        try:
+            ctx = server.request_context
+            token = ctx.meta.progressToken if ctx.meta is not None else None
+            if token is None:
+                return
+            await ctx.session.send_progress_notification(
+                token, progress, total=1.0, message=message
+            )
+        except Exception:
+            pass
 
     @server.list_tools()
     async def _list_tools() -> list[Tool]:
@@ -415,42 +643,99 @@ def build_server(client: BlenderBridgeClient | None = None) -> Server:
     @server.call_tool()
     async def _call_tool(
         name: str, arguments: dict[str, Any] | None
-    ) -> list[TextContent | ImageContent]:
-        return _dispatch_tool(client, name, arguments or {})
+    ) -> tuple[list[TextContent | ImageContent], dict[str, Any]]:
+        # the bridge client blocks on socket I/O; a worker thread keeps the
+        # asyncio loop responsive while a tool call is in flight
+        await _send_progress(0.0, f"Running {name} in Blender")
+        try:
+            result = await asyncio.to_thread(_dispatch_tool, client, name, arguments or {})
+        finally:
+            await _send_progress(1.0, f"{name} finished")
+        return result
+
+    @server.list_resources()
+    async def _list_resources() -> list[Resource]:
+        return [
+            Resource(
+                uri=AnyUrl(uri),
+                name=name,
+                description=description,
+                mimeType="application/json",
+            )
+            for uri, name, description in _RESOURCES
+        ]
+
+    @server.list_resource_templates()
+    async def _list_resource_templates() -> list[ResourceTemplate]:
+        return [
+            ResourceTemplate(
+                uriTemplate=_ELEMENT_PSETS_TEMPLATE,
+                name="Element property sets",
+                description=(
+                    "Property and quantity sets for one element, addressed "
+                    "by its IFC GlobalId."
+                ),
+                mimeType="application/json",
+            )
+        ]
+
+    @server.read_resource()
+    async def _read_resource(uri: AnyUrl) -> list[ReadResourceContents]:
+        payload = await asyncio.to_thread(_read_resource_payload, client, str(uri))
+        return [ReadResourceContents(content=_as_json(payload), mime_type="application/json")]
+
+    @server.list_prompts()
+    async def _list_prompts() -> list[Prompt]:
+        return list(_PROMPTS)
+
+    @server.get_prompt()
+    async def _get_prompt(name: str, arguments: dict[str, str] | None) -> GetPromptResult:
+        text = _prompt_text(name, arguments)
+        prompt = next((p for p in _PROMPTS if p.name == name), None)
+        return GetPromptResult(
+            description=prompt.description if prompt else None,
+            messages=[
+                PromptMessage(role="user", content=TextContent(type="text", text=text))
+            ],
+        )
 
     return server
 
 
+# stripped from structured screenshot output: the pixels already ship as an
+# image block, and the bridge-side temp path is meaningless to clients
+_SCREENSHOT_STRUCTURED_EXCLUDES = ("image_base64", "path")
+
+
 def _dispatch_tool(
     client: BlenderBridgeClient, name: str, arguments: dict[str, Any]
-) -> list[TextContent | ImageContent]:
-    """Route a tool call to its handler."""
-    if name == TOOL_GET_SCENE_INFO:
-        return [TextContent(type="text", text=tool_get_scene_info(client, arguments))]
-
-    if name == TOOL_GET_SELECTED_OBJECTS:
-        return [TextContent(type="text", text=tool_get_selected_objects(client))]
-
-    if name == TOOL_GET_PSETS:
-        return [TextContent(type="text", text=tool_get_psets(client, arguments))]
-
+) -> tuple[list[TextContent | ImageContent], dict[str, Any]]:
+    """Route a tool call to its handler; return (content blocks, structured result)."""
     if name == TOOL_GET_VIEWPORT_SCREENSHOT:
         payload = tool_get_viewport_screenshot(client, arguments)
-        return _screenshot_to_mcp_content(payload)
+        structured = {
+            k: v for k, v in payload.items() if k not in _SCREENSHOT_STRUCTURED_EXCLUDES
+        }
+        return _screenshot_to_mcp_content(payload), structured
 
-    if name == TOOL_GET_IFC_PROJECT_INFO:
-        return [TextContent(type="text", text=tool_get_ifc_project_info(client))]
-
-    if name == TOOL_EXECUTE_IFC_CODE:
-        return [TextContent(type="text", text=tool_execute_ifc_code(client, arguments))]
-
-    if name == TOOL_EXECUTE_BLENDER_CODE:
-        return [TextContent(type="text", text=tool_execute_blender_code(client, arguments))]
-
-    if name == TOOL_SAVE_IFC_FILE:
-        return [TextContent(type="text", text=tool_save_ifc_file(client, arguments))]
-
-    return [TextContent(type="text", text=f"Unknown tool: {name!r}")]
+    handlers = {
+        TOOL_GET_SCENE_INFO: lambda: tool_get_scene_info(client, arguments),
+        TOOL_GET_SELECTED_OBJECTS: lambda: tool_get_selected_objects(client, arguments),
+        TOOL_LIST_ELEMENTS: lambda: tool_list_elements(client, arguments),
+        TOOL_GET_PSETS: lambda: tool_get_psets(client, arguments),
+        TOOL_GET_IFC_PROJECT_INFO: lambda: tool_get_ifc_project_info(client),
+        TOOL_GET_SPATIAL_STRUCTURE: lambda: tool_get_spatial_structure(client, arguments),
+        TOOL_GET_QUANTITIES: lambda: tool_get_quantities(client, arguments),
+        TOOL_EXECUTE_IFC_CODE: lambda: tool_execute_ifc_code(client, arguments),
+        TOOL_EXECUTE_BLENDER_CODE: lambda: tool_execute_blender_code(client, arguments),
+        TOOL_SAVE_IFC_FILE: lambda: tool_save_ifc_file(client, arguments),
+    }
+    handler = handlers.get(name)
+    if handler is None:
+        # raising lets the MCP layer mark the result isError=true
+        raise ValueError(f"Unknown tool: {name!r}")
+    payload = handler()
+    return [TextContent(type="text", text=_as_json(payload))], payload
 
 
 def _screenshot_to_mcp_content(
@@ -458,19 +743,17 @@ def _screenshot_to_mcp_content(
 ) -> list[TextContent | ImageContent]:
     """Translate the bridge's screenshot payload into MCP content blocks."""
     if "error" in payload:
-        return [TextContent(type="text", text=str(payload["error"]))]
+        raise ToolError(str(payload["error"]))
 
     image_b64 = payload.get("image_base64")
     image_format = (payload.get("format") or "png").lower()
-    path = payload.get("path")
 
     out: list[TextContent | ImageContent] = []
     if image_b64:
         try:
             base64.b64decode(image_b64, validate=True)
         except Exception as exc:
-            out.append(TextContent(type="text", text=f"Screenshot decode failed: {exc}"))
-            return out
+            raise ToolError(f"Screenshot decode failed: {exc}") from exc
         # image first: some MCP clients mishandle mixed content
         out.append(
             ImageContent(
@@ -480,26 +763,32 @@ def _screenshot_to_mcp_content(
             )
         )
     notes: list[str] = []
-    if path:
+    if image_b64:
         width = payload.get("width")
         height = payload.get("height")
-        size_note = f" ({width}x{height}, {payload.get('bytes')} bytes)" if width and height else ""
-        notes.append(f"Viewport saved to: {path}{size_note}")
-    if image_b64:
-        # the length makes a client-side image drop diagnosable from text
+        size_note = f", {width}x{height} px" if width and height else ""
+        # the length makes a client-side image drop diagnosable from text;
+        # the temp-file path is deliberately omitted (dead tokens client-side)
         notes.append(
             f"Image block attached: {len(image_b64)} base64 chars of "
-            f"image/{image_format}. If no image is visible above, the MCP "
-            "client dropped it; use the viewport state below (retry with "
-            "include_objects=true for per-object boxes) instead of the pixels."
+            f"image/{image_format}{size_note}. If no image is visible above, "
+            "the MCP client dropped it; use the viewport state below (retry "
+            "with include_objects=true for per-object boxes) instead of the "
+            "pixels."
         )
+    note = payload.get("note")
+    if note:
+        notes.append(str(note))
+    legend = payload.get("class_legend")
+    if legend:
+        notes.append("Class colors (RGB 0-1):\n" + json.dumps(legend, indent=2, default=str))
     viewport = payload.get("viewport")
     if viewport is not None:
         notes.append("Viewport state:\n" + json.dumps(viewport, indent=2, default=str))
     if notes:
         out.append(TextContent(type="text", text="\n".join(notes)))
     if not out:
-        out.append(TextContent(type="text", text="Screenshot returned no payload."))
+        raise ToolError("Screenshot returned no payload.")
     return out
 
 

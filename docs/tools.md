@@ -1,17 +1,28 @@
 # Tools reference
 
-Bonsai MCP exposes eight tools, split into two categories:
+Bonsai MCP exposes eleven tools, split into two categories:
 
 | Category | Behaviour | Tools |
 | --- | --- | --- |
-| **QUERY** | Read-only. Safe to call without confirmation. | `get_scene_info`, `get_selected_objects`, `get_psets`, `get_viewport_screenshot`, `get_ifc_project_info` |
+| **QUERY** | Read-only. Safe to call without confirmation. | `get_scene_info`, `get_selected_objects`, `list_elements`, `get_psets`, `get_viewport_screenshot`, `get_ifc_project_info`, `get_spatial_structure`, `get_quantities` |
 | **EDIT** | Mutates Blender state, the IFC model, or the filesystem. | `execute_ifc_code`, `execute_blender_code`, `save_ifc_file` |
 
 The category is encoded in two places:
 
 - A `[QUERY]` or `[EDIT]` prefix at the start of every tool description.
-- The standard MCP `Tool.annotations.readOnlyHint` field, which MCP clients
+- The standard MCP `Tool.annotations` hints (`readOnlyHint`,
+  `destructiveHint`, `idempotentHint`, `openWorldHint`), which MCP clients
   can read to render the distinction natively.
+
+Every tool also declares an `outputSchema` and returns
+`structuredContent` alongside the human-readable JSON text, so clients
+that understand structured tool output get typed results for free. Input
+schemas are generated from the same Pydantic models the server validates
+with, so schema and behaviour cannot drift apart.
+
+List-shaped results are paged: pass `limit`/`offset` where offered and
+watch the `total`/`truncated` flags instead of requesting everything at
+once.
 
 Two code execution tools live in the EDIT category: `execute_ifc_code`
 (preferred, IFC-only, `bpy` blocked) and `execute_blender_code` (full `bpy`
@@ -22,6 +33,10 @@ access). See [Safety](safety.md).
 Returns a scene-level snapshot. When `query` is supplied, the response also
 includes an `objects` array filtered by the query.
 
+For structured element listings, prefer the dedicated
+[`list_elements`](#list_elements-query) tool; the `query` parameter here
+remains for compatibility.
+
 Inputs (all optional):
 
 ```json
@@ -29,7 +44,9 @@ Inputs (all optional):
   "query": "walls",
   "ifc_class": null,
   "name": null,
-  "global_id": null
+  "global_id": null,
+  "limit": 200,
+  "offset": 0
 }
 ```
 
@@ -66,43 +83,202 @@ Returns:
       "ifc_class": "IfcWall",
       "global_id": "2O2Fr$t4X7Zf8NOew3FK6X"
     }
-  ]
+  ],
+  "objects_total": 28,
+  "objects_truncated": false,
+  "objects_offset": 0,
+  "objects_limit": 200
 }
 ```
 
-The `objects` field is omitted entirely when no `query` is supplied.
+The `objects` field (and its paging metadata) is omitted entirely when no
+`query` is supplied. On huge scenes, page with `limit`/`offset` instead of
+raising the limit.
 
 ## `get_selected_objects` (QUERY)
 
-Inputs: none.
+Inputs (optional): `limit` (1-1000, default 200), because a box-select can
+grab thousands of objects.
 
-Returns a list of:
+Returns:
 
 ```json
 {
-  "name": "IfcWall/MyWall",
-  "type": "MESH",
-  "location": [0.0, 0.0, 0.0],
-  "dimensions": [5.0, 0.2, 3.0],
-  "ifc_class": "IfcWall",
-  "global_id": "2O2Fr$t4X7Zf8NOew3FK6X"
+  "objects": [
+    {
+      "name": "IfcWall/MyWall",
+      "type": "MESH",
+      "location": [0.0, 0.0, 0.0],
+      "dimensions": [5.0, 0.2, 3.0],
+      "ifc_class": "IfcWall",
+      "global_id": "2O2Fr$t4X7Zf8NOew3FK6X"
+    }
+  ],
+  "total": 1,
+  "truncated": false
 }
 ```
 
 `ifc_class` and `global_id` are `null` if no IFC data is associated.
 
+## `list_elements` (QUERY)
+
+Lists IFC-backed elements (objects without an IFC entity are skipped) with
+structured filters, replacing most uses of `get_scene_info` queries.
+
+Inputs (all optional):
+
+```json
+{
+  "ifc_class": "IfcWall",
+  "name_contains": "kitchen",
+  "storey": "Level 1",
+  "limit": 200,
+  "offset": 0
+}
+```
+
+| Input | Notes |
+| --- | --- |
+| `ifc_class` | Inheritance-aware: `IfcWall` also matches `IfcWallStandardCase`. |
+| `name_contains` | Case-insensitive substring match on the Blender object name. |
+| `storey` | Name or GlobalId of an `IfcBuildingStorey`. Elements inside the storey's spaces count as in the storey. |
+| `limit` / `offset` | Paging, 1-1000 per page (default 200). |
+
+Returns:
+
+```json
+{
+  "elements": [
+    {
+      "name": "IfcWall/MyWall",
+      "type": "MESH",
+      "location": [0.0, 0.0, 0.0],
+      "dimensions": [5.0, 0.2, 3.0],
+      "ifc_class": "IfcWall",
+      "global_id": "2O2Fr$t4X7Zf8NOew3FK6X"
+    }
+  ],
+  "total": 28,
+  "truncated": false,
+  "offset": 0,
+  "limit": 200
+}
+```
+
+## `get_spatial_structure` (QUERY)
+
+Returns the project's spatial hierarchy as a tree: `IfcProject` ->
+`IfcSite` -> `IfcBuilding` -> `IfcBuildingStorey` -> `IfcSpace`, with
+storey elevations and (by default) counts of contained elements grouped by
+IFC class. Answers "what is in this building, storey by storey" without
+any code execution.
+
+Inputs (optional): `include_element_counts` (default `true`).
+
+Returns:
+
+```json
+{
+  "schema": "IFC4",
+  "tree": {
+    "name": "My Project",
+    "ifc_class": "IfcProject",
+    "global_id": "0YvctVUKr0kugbFTf53O9L",
+    "children": [
+      {
+        "name": "Site",
+        "ifc_class": "IfcSite",
+        "global_id": "...",
+        "children": [
+          {
+            "name": "Building",
+            "ifc_class": "IfcBuilding",
+            "global_id": "...",
+            "children": [
+              {
+                "name": "Level 1",
+                "ifc_class": "IfcBuildingStorey",
+                "global_id": "...",
+                "elevation": 0.0,
+                "element_counts": {"IfcDoor": 9, "IfcWall": 28},
+                "element_total": 37,
+                "children": [
+                  {"name": "Kitchen", "ifc_class": "IfcSpace", "global_id": "..."}
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+## `get_quantities` (QUERY)
+
+Quantity takeoff without code execution: aggregates every numeric value
+found in elements' IFC quantity sets (base quantities such as walls'
+`NetSideArea` or slabs' `GrossVolume`), grouped by IFC class and
+optionally per building storey.
+
+Inputs (all optional):
+
+```json
+{
+  "ifc_classes": ["IfcWall", "IfcSlab"],
+  "by_storey": false
+}
+```
+
+`ifc_classes` defaults to the common building element classes (walls,
+slabs, columns, beams, doors, windows, roofs, stairs, coverings, spaces);
+matching is inheritance-aware.
+
+Returns:
+
+```json
+{
+  "classes": {
+    "IfcWall": {
+      "count": 28,
+      "elements_without_quantities": 2,
+      "quantities": {
+        "NetSideArea": {"sum": 412.6, "elements": 26},
+        "Length": {"sum": 148.2, "elements": 26}
+      }
+    }
+  },
+  "units": {"LENGTHUNIT": "millimetre", "AREAUNIT": "square metre"},
+  "by_storey": {
+    "Level 1": {
+      "IfcWall": {"count": 12, "quantities": {"NetSideArea": {"sum": 180.1, "elements": 12}}}
+    }
+  }
+}
+```
+
+`elements_without_quantities` is a model-quality signal: elements of that
+class carrying no numeric quantities at all. `units` is a best-effort read
+of the project's unit assignment. `by_storey` appears only when requested.
+
 ## `get_psets` (QUERY)
 
 Returns IFC property sets and quantity sets for one or more objects.
-Accepts any mix of GlobalIds and Blender object names. Up to 100 targets
-per call (combined across both lists).
+Accepts any mix of GlobalIds and Blender object names. Large batches are
+paged: `limit` targets (default and maximum 100) are processed per call,
+starting at `offset` (GlobalIds first, then names); the response reports
+`targets_total`, `truncated`, and `next_offset` so clients can continue.
 
 Inputs (at least one entry required between the two lists):
 
 ```json
 {
   "global_ids": ["2O2Fr$t4X7Zf8NOew3FK6X"],
-  "names": ["IfcWall/MyWall"]
+  "names": ["IfcWall/MyWall"],
+  "limit": 100,
+  "offset": 0
 }
 ```
 
@@ -170,6 +346,11 @@ Inputs (all optional):
   "quality": 85,
   "view": "iso",
   "fit": "all",
+  "azimuth": null,
+  "elevation": null,
+  "storey": null,
+  "shading": null,
+  "show_overlays": false,
   "include_objects": false,
   "max_objects": 50
 }
@@ -177,23 +358,29 @@ Inputs (all optional):
 
 | Input | Values | Notes |
 | --- | --- | --- |
-| `max_size` | 64-2048, default 800 | Longest edge in px. Downscales only, never upscales. |
-| `format` | `jpeg` (default), `png` | JPEG is much smaller; PNG is lossless. |
+| `max_size` | 64-2048, default 800 | Longest edge in px. Downscales only, never upscales, and is additionally capped by the native viewport resolution. |
+| `format` | `jpeg` (default), `png` | JPEG is much smaller; PNG is lossless. A PNG that is estimated to exceed the response size cap is auto-downgraded to JPEG *before* rendering, with a note in the response. |
 | `quality` | 1-100, default 85 | JPEG only. |
 | `view` | `top`, `bottom`, `front`, `back`, `left`, `right`, `iso`, `camera` | Aims the viewport first. Axis names give orthographic views, `iso` a perspective isometric, `camera` the scene camera. Omit to keep the current orientation. |
-| `fit` | `all`, `selected` | Frames everything or the current selection. Combines with `view`. |
-| `include_objects` | boolean, default false | Adds screen-space 2D bounding boxes keyed by GlobalId to the text output. |
-| `max_objects` | 1-200, default 50 | Cap for `include_objects`; largest boxes kept, truncation flagged. |
+| `azimuth` / `elevation` | degrees | Arbitrary view direction instead of `view` (mutually exclusive with it). Azimuth 0 = front, counter-clockwise seen from above; elevation 0 = horizontal, 90 = bird's eye (defaults to 30 when only azimuth is given). `iso` equals azimuth 45, elevation 30. |
+| `fit` | `all`, `selected` | Frames everything or the current selection. Framing is direction-aware: after the initial fit, the zoom is tightened to the content's projected 2D extent, so elevations fill the frame instead of the bounding sphere. |
+| `storey` | storey Name or GlobalId | Isolates one `IfcBuildingStorey` for the shot: everything else is hidden and restored afterwards. `storey` + `view='top'` + `fit='all'` is a floor plan. |
+| `shading` | `wireframe`, `solid`, `material`, `rendered`, `class_colors` | Viewport shading for the capture (restored afterwards). `class_colors` renders solid with one flat color per IFC class and returns a legend. |
+| `show_overlays` | boolean, default false | Overlays (grid, axes, gizmos) are hidden by default; they are noise for image analysis. Set true to keep them. |
+| `include_objects` | boolean, default false | Adds screen-space 2D bounding boxes and view depth keyed by GlobalId to the text output. |
+| `max_objects` | 1-200, default 50 | Cap for `include_objects`. Selection is stratified across IFC classes (a few walls, doors, windows, ...) so ground slabs cannot crowd out everything else; truncation is flagged. |
 
 Returns, in order:
 
 1. An MCP **image content block** (`image/jpeg` or `image/png`). The image
    comes first because some MCP clients mishandle mixed content.
-2. A **text block** with the saved file path, dimensions and byte size, the
-   attached base64 length (so a client-side image drop is diagnosable from
-   text), and structured **viewport state**: rotation quaternion,
-   perspective mode (`PERSP`/`ORTHO`/`CAMERA`), `is_orthographic_side_view`,
-   view distance, and pivot location.
+2. A **text block** with the image dimensions and attached base64 length
+   (so a client-side image drop is diagnosable from text), any
+   auto-downgrade note, the `class_colors` legend when requested, and
+   structured **viewport state**: rotation quaternion, perspective mode
+   (`PERSP`/`ORTHO`/`CAMERA`), `is_orthographic_side_view`, view distance,
+   pivot location, and (when used) the applied `azimuth`/`elevation` and
+   `storey`.
 
 With `include_objects=true`, the viewport state also lists in-frame objects:
 
@@ -204,7 +391,8 @@ With `include_objects=true`, the viewport state also lists in-frame objects:
       "name": "IfcWall/MyWall",
       "ifc_class": "IfcWall",
       "global_id": "2O2Fr$t4X7Zf8NOew3FK6X",
-      "box": [0.329, 0.55, 0.712, 0.563]
+      "box": [0.329, 0.55, 0.712, 0.563],
+      "depth": 24.6
     }
   ],
   "objects_in_view_total": 1250,
@@ -213,14 +401,17 @@ With `include_objects=true`, the viewport state also lists in-frame objects:
 ```
 
 `box` is `[x_min, y_min, x_max, y_max]`, normalized 0-1 with the origin at
-the image's top-left (smaller `y` is higher on screen). Boxes are
-approximate but preserve relative spatial layout, which lets a text-only
-agent reason about containment, left/right/above/below relations, and
-relative sizes even when its client does not deliver tool-result images.
+the image's top-left (smaller `y` is higher on screen). `depth` is the
+view-space distance to the object's bounding-box centre in model units, so
+near/far ordering is available from text alone. Boxes are approximate
+(full object extent, ignoring occlusion) but preserve relative spatial
+layout, which lets a text-only agent reason about containment,
+left/right/above/below relations, relative sizes, and depth ordering even
+when its client does not deliver tool-result images.
 
-If Blender is running in `--background` mode or has no usable 3D viewport,
-the tool returns an error message instead (and `view`/`fit` require an open
-3D viewport).
+If Blender is running in `--background` mode or has no open 3D viewport,
+the tool returns a clear error (a visible `VIEW_3D` area is required).
+When several 3D viewports are open, the largest one is used.
 
 ## `get_ifc_project_info` (QUERY)
 
@@ -396,3 +587,27 @@ Returns:
 (preferred; Bonsai's exporter first syncs pending Blender-side edits into
 the IFC model) or `"ifcopenshell.write"` (fallback when Bonsai is not
 available).
+
+## Resources and prompts
+
+Beyond tools, the server exposes read-only state as MCP **resources**
+(clients can pin them into context without a tool round trip):
+
+| URI | Content |
+| --- | --- |
+| `bonsai://project` | The `get_ifc_project_info` payload. |
+| `bonsai://scene` | The scene summary (no object query). |
+| `bonsai://element/{global_id}/psets` | Resource template: psets/qtos for one element. |
+
+All resources return `application/json`.
+
+Two MCP **prompts** encode the workflows the server instructions describe
+in prose:
+
+| Prompt | Arguments | What it does |
+| --- | --- | --- |
+| `model-audit` | `focus` (optional) | Walk the model with the query tools (project info, spatial tree, quantities, pset spot-checks, screenshots) and produce a quality report. |
+| `visual-verify` | `what_changed` (optional) | Reload if needed, take overview and detail screenshots, compare against the intended edit. |
+
+Long operations also emit coarse MCP progress notifications when the
+client supplies a `progressToken`.

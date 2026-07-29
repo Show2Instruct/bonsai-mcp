@@ -165,6 +165,14 @@ class TestClientEnvDefaults:
         with pytest.raises(BlenderBridgeError, match="BONSAI_MCP_TIMEOUT must be a number"):
             BlenderBridgeClient()
 
+    def test_explicit_falsy_host_and_port_are_honored(self, monkeypatch):
+        # an explicit host="" or port=0 must not be silently replaced by env/defaults
+        monkeypatch.setenv("BONSAI_MCP_HOST", "envhost")
+        monkeypatch.setenv("BONSAI_MCP_PORT", "12345")
+        client = BlenderBridgeClient(host="", port=0, timeout=1.0)
+        assert client.host == ""
+        assert client.port == 0
+
 
 class TestForeignService:
     """A different service on the bridge port must produce a clear error, not a traceback."""
@@ -193,6 +201,182 @@ class TestForeignService:
         client = BlenderBridgeClient(host="127.0.0.1", port=port, timeout=5.0)
         with pytest.raises(BlenderBridgeError, match="not a Bonsai MCP bridge response"):
             client.send("ping")
+
+
+def _read_frame(conn: socket.socket) -> dict | None:
+    header = b""
+    while len(header) < 4:
+        chunk = conn.recv(4 - len(header))
+        if not chunk:
+            return None
+        header += chunk
+    (length,) = struct.unpack(">I", header)
+    body = b""
+    while len(body) < length:
+        chunk = conn.recv(length - len(body))
+        if not chunk:
+            return None
+        body += chunk
+    return json.loads(body.decode("utf-8"))
+
+
+def _send_frame(conn: socket.socket, payload: dict) -> None:
+    body = json.dumps(payload).encode("utf-8")
+    conn.sendall(struct.pack(">I", len(body)) + body)
+
+
+def _listener(port: int) -> socket.socket:
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", port))
+    srv.listen(2)
+    srv.settimeout(5.0)
+    return srv
+
+
+class TestPersistentConnection:
+    def test_two_requests_reuse_one_connection(self):
+        port = _free_port()
+        srv = _listener(port)
+        stats = {"accepts": 0, "requests": []}
+
+        def run() -> None:
+            try:
+                conn, _ = srv.accept()
+                stats["accepts"] += 1
+                with conn:
+                    for _ in range(2):
+                        request = _read_frame(conn)
+                        if request is None:
+                            return
+                        stats["requests"].append(request)
+                        _send_frame(
+                            conn,
+                            {"success": True, "result": {"ok": True}, "id": request.get("id")},
+                        )
+            finally:
+                srv.close()
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        client = BlenderBridgeClient(host="127.0.0.1", port=port, timeout=5.0)
+        assert client.send("ping") == {"ok": True}
+        assert client.send("ping") == {"ok": True}
+        t.join(timeout=5)
+        assert stats["accepts"] == 1, "second call must reuse the open connection"
+        assert [r["id"] for r in stats["requests"]] == [1, 2]
+
+    def test_reconnects_after_bridge_closed_idle_connection(self):
+        port = _free_port()
+        srv = _listener(port)
+
+        def run() -> None:
+            try:
+                # first connection: serve one request, then close (idle timeout)
+                conn, _ = srv.accept()
+                with conn:
+                    request = _read_frame(conn)
+                    _send_frame(conn, {"success": True, "result": 1, "id": request.get("id")})
+                # second connection: the client's transparent reconnect
+                conn2, _ = srv.accept()
+                with conn2:
+                    request = _read_frame(conn2)
+                    _send_frame(conn2, {"success": True, "result": 2, "id": request.get("id")})
+            finally:
+                srv.close()
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        client = BlenderBridgeClient(host="127.0.0.1", port=port, timeout=5.0)
+        assert client.send("ping") == 1
+        assert client.send("ping") == 2, "stale connection must trigger one reconnect"
+        t.join(timeout=5)
+
+    def test_fresh_connection_eof_is_not_retried(self):
+        port = _free_port()
+        srv = _listener(port)
+
+        def run() -> None:
+            try:
+                conn, _ = srv.accept()
+                with conn:
+                    _read_frame(conn)
+                    # close without replying
+            finally:
+                srv.close()
+
+        threading.Thread(target=run, daemon=True).start()
+        client = BlenderBridgeClient(host="127.0.0.1", port=port, timeout=5.0)
+        with pytest.raises(BlenderBridgeError, match="without responding"):
+            client.send("ping")
+
+    def test_out_of_sync_reply_id_raises(self):
+        port = _free_port()
+        _serve_once("127.0.0.1", port, {"success": True, "result": "stale", "id": 999})
+        client = BlenderBridgeClient(host="127.0.0.1", port=port, timeout=5.0)
+        with pytest.raises(BlenderBridgeError, match="Out-of-sync reply"):
+            client.send("ping")
+
+    def test_request_carries_id_and_token(self, monkeypatch):
+        monkeypatch.setenv("BONSAI_MCP_TOKEN", "sekret")
+        port = _free_port()
+        srv = _listener(port)
+        captured: dict = {}
+
+        def run() -> None:
+            try:
+                conn, _ = srv.accept()
+                with conn:
+                    request = _read_frame(conn)
+                    captured.update(request or {})
+                    _send_frame(conn, {"success": True, "result": {}, "id": request.get("id")})
+            finally:
+                srv.close()
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        client = BlenderBridgeClient(host="127.0.0.1", port=port, timeout=5.0)
+        client.send("ping")
+        t.join(timeout=5)
+        assert captured["command"] == "ping"
+        assert captured["id"] == 1
+        assert captured["token"] == "sekret"
+
+    def test_no_token_field_when_unset(self, monkeypatch):
+        monkeypatch.delenv("BONSAI_MCP_TOKEN", raising=False)
+        port = _free_port()
+        srv = _listener(port)
+        captured: dict = {}
+
+        def run() -> None:
+            try:
+                conn, _ = srv.accept()
+                with conn:
+                    request = _read_frame(conn)
+                    captured.update(request or {})
+                    _send_frame(conn, {"success": True, "result": {}})
+            finally:
+                srv.close()
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        client = BlenderBridgeClient(host="127.0.0.1", port=port, timeout=5.0)
+        client.send("ping")
+        t.join(timeout=5)
+        assert "token" not in captured
+
+
+class TestVersionSkew:
+    def test_unknown_command_error_appends_redeploy_hint(self):
+        port = _free_port()
+        _serve_once(
+            "127.0.0.1",
+            port,
+            {"success": False, "error": "ValueError: Unknown command: 'list_elements'"},
+        )
+        client = BlenderBridgeClient(host="127.0.0.1", port=port, timeout=5.0)
+        with pytest.raises(BlenderBridgeError, match="redeploy"):
+            client.send("list_elements")
 
 
 class TestClientFrameCap:
