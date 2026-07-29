@@ -9,9 +9,10 @@ loaded IFC project, capture the viewport, and run Python inside Blender.
 MCP client  --stdio-->  bonsai-mcp  --127.0.0.1:9878-->  Blender add-on (bpy + Bonsai + IfcOpenShell)
 ```
 
-This project is part of [IFC-CoPilot: A Tool-Based Framework for LLM-Driven
-IFC Building Design](https://show2instruct.github.io/ifc-copilot/) and a more
-improved version of [ifc-bonsai-mcp](https://github.com/Show2Instruct/ifc-bonsai-mcp).
+> This project is part of [IFC-CoPilot: A Tool-Based Framework for LLM-Driven IFC Building Design](https://show2instruct.github.io/ifc-copilot/).
+
+> This repository is an updated and simpler version of [ifc-bonsai-mcp](https://github.com/Show2Instruct/ifc-bonsai-mcp). We used the original repository for the experiments in the [MCP4IFC paper](https://arxiv.org/abs/2511.05533). The original repository is still available. It contains many predefined tools. This repository mainly uses code generation. Modern LLMs are very good at generating IfcOpenShell code. Code generation can therefore handle many IFC tasks. It is also more flexible than using many fixed tools. We have improved and simplified the code-generation workflow in this MCP server. The server is lightweight, easy to connect, and easy to use. We recommend this repository for most users. We will also keep it updated and continue improving it.
+
 
 ## Requirements
 
