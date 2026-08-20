@@ -220,3 +220,9 @@ through [GitHub Security Advisories](https://github.com/Show2Instruct/bonsai-mcp
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Disclaimer
+
+This is not an official Bonsai release. Bonsai MCP is an independent project, not
+affiliated with or endorsed by the Bonsai (BlenderBIM) project,
+[bonsaibim.org](https://bonsaibim.org), or the Blender Foundation.
