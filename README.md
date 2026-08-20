@@ -16,6 +16,8 @@ loaded IFC project, capture the viewport, and run Python inside Blender.
 MCP client  --stdio-->  bonsai-mcp  --127.0.0.1:9878-->  Blender add-on (bpy + Bonsai + IfcOpenShell)
 ```
 
+![Bonsai MCP workflow: an MCP client drives the bonsai-mcp server, which talks to the Blender add-on and the IFC model loaded in Bonsai](docs/assets/workflow.png)
+
 > Part of [**IFC-CoPilot**: A Tool-Based Framework for LLM-Driven IFC Building
 > Design](https://show2instruct.github.io/ifc-copilot/).
 
