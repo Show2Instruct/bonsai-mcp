@@ -88,7 +88,6 @@ reports whether the bridge requires a token. Off by default.
 
 ## What it does **not** do
 
-- No sandboxing of `execute_blender_code` (an out-of-process worker for
-  `execute_ifc_code` is planned for a future release).
+- No sandboxing: both code execution tools run in-process inside Blender.
 - No rate limiting.
 - No authentication unless the optional token is configured.

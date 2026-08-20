@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Troubleshooting guide
-    url: https://github.com/show2instruct/bonsai-mcp/blob/main/docs/troubleshooting.md
+    url: https://github.com/Show2Instruct/bonsai-mcp/blob/main/docs/troubleshooting.md
     about: Common problems (bridge unreachable, no tools, screenshot fails) and the doctor command.
   - name: Security report
-    url: https://github.com/show2instruct/bonsai-mcp/blob/main/SECURITY.md
+    url: https://github.com/Show2Instruct/bonsai-mcp/blob/main/SECURITY.md
     about: Please report vulnerabilities privately, not as a public issue.

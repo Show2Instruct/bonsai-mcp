@@ -18,6 +18,9 @@ site/
 .vscode/
 *.log
 *.tmp
+.DS_Store
+Thumbs.db
+desktop.ini
 dev/
 CLAUDE.md
 .mcp.json

@@ -397,6 +397,189 @@ def test_list_elements_storey_filter(bridge, monkeypatch):
         bridge._h_list_elements({"storey": "Level 99"})
 
 
+def _install_fake_selector(monkeypatch, filter_elements):
+    """Install a fake ifcopenshell.util.selector into sys.modules."""
+    ifcopenshell_mod = types.ModuleType("ifcopenshell")
+    util_mod = types.ModuleType("ifcopenshell.util")
+    selector_mod = types.ModuleType("ifcopenshell.util.selector")
+    selector_mod.filter_elements = filter_elements
+    util_mod.selector = selector_mod
+    ifcopenshell_mod.util = util_mod
+    monkeypatch.setitem(sys.modules, "ifcopenshell", ifcopenshell_mod)
+    monkeypatch.setitem(sys.modules, "ifcopenshell.util", util_mod)
+    monkeypatch.setitem(sys.modules, "ifcopenshell.util.selector", selector_mod)
+
+
+def test_list_elements_selector_filter(bridge, monkeypatch):
+    wall1 = FakeElement("IfcWall", step_id=1)
+    wall2 = FakeElement("IfcWall", step_id=2)
+    elements = {1: wall1, 2: wall2}
+    ifc = SimpleNamespace(by_id=lambda i: elements[i])
+    monkeypatch.setattr(bridge, "_get_loaded_ifc", lambda: ifc)
+    bridge._fake_bpy.context.scene.objects = [
+        _mesh_obj("IfcWall/W1", 1),
+        _mesh_obj("IfcWall/W2", 2),
+    ]
+    seen_queries = []
+
+    def fake_filter(ifc_file, query):
+        seen_queries.append((ifc_file, query))
+        return [wall1]  # only W1 matches the selector
+
+    _install_fake_selector(monkeypatch, fake_filter)
+
+    out = bridge._h_list_elements({"selector": "IfcWall, Pset_WallCommon.FireRating=F30"})
+    assert [e["name"] for e in out["elements"]] == ["IfcWall/W1"]
+    assert seen_queries == [(ifc, "IfcWall, Pset_WallCommon.FireRating=F30")]
+
+
+def test_list_elements_selector_syntax_error_includes_cheat_sheet(bridge, monkeypatch):
+    ifc = SimpleNamespace(by_id=lambda i: None)
+    monkeypatch.setattr(bridge, "_get_loaded_ifc", lambda: ifc)
+
+    def bad_filter(_ifc, _query):
+        raise ValueError("unexpected token")
+
+    _install_fake_selector(monkeypatch, bad_filter)
+
+    with pytest.raises(ValueError, match="Invalid selector") as excinfo:
+        bridge._h_list_elements({"selector": "IfcWall ==== nope"})
+    assert "Selector examples" in str(excinfo.value)
+
+
+def test_list_elements_selector_without_ifcopenshell_errors_clearly(bridge, monkeypatch):
+    ifc = SimpleNamespace(by_id=lambda i: None)
+    monkeypatch.setattr(bridge, "_get_loaded_ifc", lambda: ifc)
+    # a None entry in sys.modules makes `import ifcopenshell...` raise ImportError
+    monkeypatch.setitem(sys.modules, "ifcopenshell", None)
+
+    with pytest.raises(RuntimeError, match="selector"):
+        bridge._h_list_elements({"selector": "IfcWall"})
+
+
+def _fake_bonsai_tool_for_refresh(objects_by_element_id):
+    """Minimal bonsai.tool fake for the refresh handlers."""
+    reloaded: list = []
+
+    class Loader:
+        @staticmethod
+        def get_name(element):
+            return f"{element.is_a()}/{element.Name}"
+
+    class Ifc:
+        @staticmethod
+        def get_object(element):
+            return objects_by_element_id.get(element.id())
+
+    class Geometry:
+        @staticmethod
+        def reload_representation(objs):
+            reloaded.extend(objs)
+
+    return SimpleNamespace(Loader=Loader, Ifc=Ifc, Geometry=Geometry), reloaded
+
+
+def test_refresh_view_syncs_names(bridge, monkeypatch):
+    wall = FakeElement("IfcWall", step_id=1, Name="W1 renamed", GlobalId="G1")
+    obj = SimpleNamespace(name="IfcWall/W1 old")
+    elements = {"G1": wall}
+    ifc = SimpleNamespace(by_guid=lambda g: elements[g])
+    tool_mod, _reloaded = _fake_bonsai_tool_for_refresh({1: obj})
+    monkeypatch.setattr(bridge, "_get_loaded_ifc", lambda: ifc)
+    monkeypatch.setattr(bridge, "_get_bonsai_tool", lambda: tool_mod)
+
+    out = bridge._h_refresh_view({"global_ids": ["G1", "MISSING"]})
+    assert obj.name == "IfcWall/W1 renamed"
+    assert out["refreshed"] == 1
+    assert out["results"][0]["renamed"] is True
+    assert "reload_project" in out["results"][1]["error"]
+
+
+def test_refresh_view_element_without_object_reports_error(bridge, monkeypatch):
+    wall = FakeElement("IfcWall", step_id=1, Name="W1", GlobalId="G1")
+    ifc = SimpleNamespace(by_guid=lambda g: wall)
+    tool_mod, _reloaded = _fake_bonsai_tool_for_refresh({})  # no Blender object
+    monkeypatch.setattr(bridge, "_get_loaded_ifc", lambda: ifc)
+    monkeypatch.setattr(bridge, "_get_bonsai_tool", lambda: tool_mod)
+
+    out = bridge._h_refresh_view({"global_ids": ["G1"]})
+    assert out["refreshed"] == 0
+    assert "reload_project" in out["results"][0]["error"]
+
+
+def test_refresh_targets_validation(bridge, monkeypatch):
+    monkeypatch.setattr(bridge, "_get_loaded_ifc", lambda: SimpleNamespace())
+    monkeypatch.setattr(bridge, "_get_bonsai_tool", lambda: SimpleNamespace())
+    with pytest.raises(ValueError, match="global_ids"):
+        bridge._h_refresh_view({})
+    with pytest.raises(ValueError, match="Too many targets"):
+        bridge._h_refresh_view({"global_ids": ["G"] * (bridge._REFRESH_MAX_TARGETS + 1)})
+
+
+def test_refresh_geometry_reloads_representation_and_placement(bridge, monkeypatch):
+    wall = FakeElement("IfcWall", step_id=1, Name="W1", GlobalId="G1")
+    obj = SimpleNamespace(name="IfcWall/W1")
+    ifc = SimpleNamespace(by_guid=lambda g: wall)
+    tool_mod, reloaded = _fake_bonsai_tool_for_refresh({1: obj})
+    monkeypatch.setattr(bridge, "_get_loaded_ifc", lambda: ifc)
+    monkeypatch.setattr(bridge, "_get_bonsai_tool", lambda: tool_mod)
+    placement_calls = []
+    monkeypatch.setattr(
+        bridge,
+        "_sync_object_placement",
+        lambda t, f, e, o: placement_calls.append(e) or True,
+    )
+
+    out = bridge._h_refresh_geometry({"global_ids": ["G1"]})
+    assert out["refreshed"] == 1
+    assert out["representations_reloaded"] is True
+    assert reloaded == [obj]
+    assert placement_calls == [wall]
+    assert out["results"][0]["placement_synced"] is True
+
+
+def test_reload_project_uses_temp_file_and_restores_path(bridge, monkeypatch):
+    monkeypatch.setattr(bridge, "_get_bonsai_tool", lambda: SimpleNamespace())
+    monkeypatch.setattr(bridge, "_bonsai_project_path", lambda: "C:/models/house.ifc")
+    saved, loaded, restored = [], [], []
+    monkeypatch.setattr(bridge, "_save_ifc_project", lambda p: saved.append(p) or "exporter")
+    monkeypatch.setattr(bridge, "_reload_ifc_project", lambda p: loaded.append(p))
+    monkeypatch.setattr(bridge, "_restore_project_path", lambda p: restored.append(p) or True)
+
+    out = bridge._h_reload_project({})
+    assert out["reloaded"] is True and out["path_restored"] is True
+    assert out["project_path"] == "C:/models/house.ifc"
+    assert saved == loaded and len(saved) == 1
+    temp_path = saved[0]
+    assert temp_path != "C:/models/house.ifc"
+    assert temp_path.endswith("house.ifc")
+    assert restored == ["C:/models/house.ifc"]
+    bridge._cleanup_reload_dir()
+
+
+def test_reload_project_without_path_errors(bridge, monkeypatch):
+    monkeypatch.setattr(bridge, "_get_bonsai_tool", lambda: SimpleNamespace())
+    monkeypatch.setattr(bridge, "_bonsai_project_path", lambda: None)
+    with pytest.raises(RuntimeError, match="no file path"):
+        bridge._h_reload_project({})
+
+
+def test_scene_info_selected_names_capped(bridge, monkeypatch):
+    monkeypatch.setattr(bridge, "_get_loaded_ifc", lambda: None)
+    scene = bridge._fake_bpy.context.scene
+    scene.name = "Scene"
+    scene.collection = SimpleNamespace(children_recursive=[])
+    over_cap = bridge._SCENE_SELECTED_NAMES_CAP + 10
+    objs = [SimpleNamespace(name=f"O{i}", type="MESH") for i in range(over_cap)]
+    scene.objects = objs
+    bridge._fake_bpy.context.selected_objects = objs
+
+    out = bridge._h_get_scene_info({})
+    assert out["selected_count"] == over_cap
+    assert len(out["selected_objects"]) == bridge._SCENE_SELECTED_NAMES_CAP
+    assert out["selected_objects_truncated"] is True
+
+
 def test_spatial_structure_tree(bridge, monkeypatch):
     wall = FakeElement("IfcWall", step_id=100)
     door = FakeElement("IfcDoor", step_id=101)

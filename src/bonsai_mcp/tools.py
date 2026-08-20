@@ -19,6 +19,7 @@ from bonsai_mcp.schemas import (
     GetSelectedObjectsInput,
     GetSpatialStructureInput,
     ListElementsInput,
+    RefreshInput,
     SaveIfcInput,
     ViewportScreenshotInput,
 )
@@ -34,6 +35,9 @@ TOOL_GET_QUANTITIES = "get_quantities"
 TOOL_EXECUTE_IFC_CODE = "execute_ifc_code"
 TOOL_EXECUTE_BLENDER_CODE = "execute_blender_code"
 TOOL_SAVE_IFC_FILE = "save_ifc_file"
+TOOL_REFRESH_VIEW = "refresh_view"
+TOOL_REFRESH_GEOMETRY = "refresh_geometry"
+TOOL_RELOAD_PROJECT = "reload_project"
 
 QUERY_TOOL_NAMES = (
     TOOL_GET_SCENE_INFO,
@@ -49,6 +53,9 @@ EDIT_TOOL_NAMES = (
     TOOL_EXECUTE_IFC_CODE,
     TOOL_EXECUTE_BLENDER_CODE,
     TOOL_SAVE_IFC_FILE,
+    TOOL_REFRESH_VIEW,
+    TOOL_REFRESH_GEOMETRY,
+    TOOL_RELOAD_PROJECT,
 )
 ALL_TOOL_NAMES = QUERY_TOOL_NAMES + EDIT_TOOL_NAMES
 
@@ -135,6 +142,7 @@ def tool_list_elements(
                 "ifc_class": args.ifc_class,
                 "name_contains": args.name_contains,
                 "storey": args.storey,
+                "selector": args.selector,
                 "limit": args.limit,
                 "offset": args.offset,
             },
@@ -272,6 +280,43 @@ def tool_get_psets(client: BlenderBridgeClient, raw_input: dict[str, Any]) -> di
     result["truncated"] = truncated
     if truncated:
         result["next_offset"] = args.offset + len(page)
+    return result
+
+
+def tool_refresh_view(client: BlenderBridgeClient, raw_input: dict[str, Any]) -> dict[str, Any]:
+    """Sync the Blender scene after data-only IFC edits. No disk I/O."""
+    args = RefreshInput.model_validate(raw_input)
+    try:
+        result = client.send("refresh_view", {"global_ids": args.global_ids})
+    except Exception as exc:
+        raise _tool_error(exc) from exc
+    if not isinstance(result, dict):
+        raise ToolError(f"unexpected refresh_view payload: {result!r}")
+    return result
+
+
+def tool_refresh_geometry(
+    client: BlenderBridgeClient, raw_input: dict[str, Any]
+) -> dict[str, Any]:
+    """Rebuild Blender geometry for specific elements. No disk I/O."""
+    args = RefreshInput.model_validate(raw_input)
+    try:
+        result = client.send("refresh_geometry", {"global_ids": args.global_ids})
+    except Exception as exc:
+        raise _tool_error(exc) from exc
+    if not isinstance(result, dict):
+        raise ToolError(f"unexpected refresh_geometry payload: {result!r}")
+    return result
+
+
+def tool_reload_project(client: BlenderBridgeClient) -> dict[str, Any]:
+    """Rebuild the whole scene from the in-memory model. Slow; explicit only."""
+    try:
+        result = client.send("reload_project", {})
+    except Exception as exc:
+        raise _tool_error(exc) from exc
+    if not isinstance(result, dict):
+        raise ToolError(f"unexpected reload_project payload: {result!r}")
     return result
 
 

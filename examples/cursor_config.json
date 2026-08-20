@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "bonsai-mcp": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/bonsai-mcp", "bonsai-mcp"],
+      "command": "C:\\Users\\you\\.local\\bin\\uv.exe",
+      "args": ["run", "--directory", "C:\\Users\\you\\bonsai-mcp", "bonsai-mcp"],
       "env": {
         "BONSAI_MCP_HOST": "127.0.0.1",
         "BONSAI_MCP_PORT": "9878",

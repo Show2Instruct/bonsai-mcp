@@ -167,6 +167,17 @@ class ListElementsInput(BaseModel):
             "storey Name or GlobalId."
         ),
     )
+    selector: str | None = Field(
+        None,
+        description=(
+            "Optional IfcOpenShell selector query, applied on top of the "
+            "other filters. Examples: 'IfcWall, material=concrete', "
+            "'IfcWall, Pset_WallCommon.FireRating=F30', "
+            "'IfcElement, Name=/W.*1/' (regex). Uses "
+            "ifcopenshell.util.selector syntax; an invalid query returns an "
+            "error with a syntax cheat sheet."
+        ),
+    )
     limit: int = Field(
         200, ge=1, le=1000, description="Maximum elements returned; page with offset."
     )
@@ -263,6 +274,32 @@ class SaveIfcInput(BaseModel):
             "edits made via execute_ifc_code."
         ),
     )
+
+
+REFRESH_MAX_TARGETS = 200
+
+
+class RefreshInput(BaseModel):
+    """Targets for the tiered refresh tools (refresh_view, refresh_geometry)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    global_ids: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=REFRESH_MAX_TARGETS,
+        description=(
+            "GlobalIds of the elements whose IFC data was just edited. The "
+            "scene is synced only for these elements."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_targets(self) -> RefreshInput:
+        for gid in self.global_ids:
+            if not gid or not gid.strip():
+                raise ValueError("'global_ids' must not contain empty strings.")
+        return self
 
 
 SCREENSHOT_MIN_SIZE = 64

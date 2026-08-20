@@ -1,7 +1,8 @@
 # Installation
 
-Four steps: install `uv`, clone this repo, install the Blender add-on,
-point your MCP client at `uv run --directory /path/to/bonsai-mcp bonsai-mcp`.
+Five steps: install `uv`, clone this repo, install the Blender add-on,
+verify with `doctor`, then point your MCP client at
+`uv run --directory /path/to/bonsai-mcp bonsai-mcp`.
 The server runs from your local clone; it is not published to PyPI.
 
 ## 1. Install `uv`
@@ -19,7 +20,7 @@ Python 3.10+ is required; `uv` handles that for you.
 ## 2. Clone the repo
 
 ```bash
-git clone https://github.com/show2instruct/bonsai-mcp.git
+git clone https://github.com/Show2Instruct/bonsai-mcp.git
 ```
 
 Note the full path to the folder. `uv run --directory <that path> bonsai-mcp`
@@ -39,8 +40,12 @@ screenshot, and `execute_blender_code` tools work on stock Blender without it.
 2. Edit > Preferences > Add-ons. On Blender 4.2+/5.x, open the **▾** menu
    (top-right) > **Install from Disk...**; on older versions use the
    **Install...** button.
-3. Pick `blender_addon/bonsai_bridge.py` from the repo you cloned: that
-   exact file, not `scripts/package_addon.py` or a `.zip`.
+3. Pick `blender_addon/bonsai_bridge.py` from the repo you cloned (that
+   exact file, not `scripts/package_addon.py`). Alternatively, each
+   [GitHub release](https://github.com/Show2Instruct/bonsai-mcp/releases)
+   attaches a `bonsai_mcp_bridge-X.Y.Z.zip` you can install the same way;
+   pick whichever matches how you got the code, and keep the add-on version
+   matching the server version (`doctor` warns on skew).
 4. Enable **Bonsai MCP Bridge**.
 5. Sidebar (`N`) > **Bonsai MCP** tab > **Start Bridge**.
 

@@ -4,8 +4,7 @@
 
 ## Checklist
 
-- [ ] `uv run ruff check src tests blender_addon` passes
-- [ ] `uv run pytest` passes
+- [ ] `uv run ruff check src tests blender_addon scripts` passes
+- [ ] `uv run python -m pytest` passes
 - [ ] Docs updated if behavior changed (`docs/`, `README.md`)
-- [ ] `CHANGELOG.md` updated under `## [Unreleased]`
 - [ ] Version bumped in `pyproject.toml`, `src/bonsai_mcp/__init__.py`, and the add-on `bl_info` (only if releasing)

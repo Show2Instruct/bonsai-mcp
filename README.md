@@ -1,18 +1,54 @@
 # Bonsai MCP
 
+[![CI](https://github.com/Show2Instruct/bonsai-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Show2Instruct/bonsai-mcp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+[![Docs](https://img.shields.io/badge/docs-site-blue.svg)](https://show2instruct.github.io/bonsai-mcp/)
+
 A local **Model Context Protocol** server that connects any MCP client
 (Claude Desktop, Claude Code, Cursor, VS Code, OpenAI Codex) to a running
 **Blender + Bonsai** (BlenderBIM) session. Inspect the scene, query the
 loaded IFC project, capture the viewport, and run Python inside Blender.
 
+**Documentation site: [show2instruct.github.io/bonsai-mcp](https://show2instruct.github.io/bonsai-mcp/)**
+
 ```
 MCP client  --stdio-->  bonsai-mcp  --127.0.0.1:9878-->  Blender add-on (bpy + Bonsai + IfcOpenShell)
 ```
 
-> This project is part of [IFC-CoPilot: A Tool-Based Framework for LLM-Driven IFC Building Design](https://show2instruct.github.io/ifc-copilot/).
+> Part of [**IFC-CoPilot**: A Tool-Based Framework for LLM-Driven IFC Building
+> Design](https://show2instruct.github.io/ifc-copilot/).
 
-> This repository is an updated and simpler version of [ifc-bonsai-mcp](https://github.com/Show2Instruct/ifc-bonsai-mcp). We used the original repository for the experiments in the [MCP4IFC paper](https://arxiv.org/abs/2511.05533). The original repository is still available. It contains many predefined tools. This repository mainly uses code generation. Modern LLMs are very good at generating IfcOpenShell code. Code generation can therefore handle many IFC tasks. It is also more flexible than using many fixed tools. We have improved and simplified the code-generation workflow in this MCP server. The server is lightweight, easy to connect, and easy to use. We recommend this repository for most users. We will also keep it updated and continue improving it.
+## News
 
+- **[2026-08]** **v1.2 released:** three new tools that sync Blender after IFC
+  edits without a full reload (`refresh_view`, `refresh_geometry`,
+  `reload_project`), plus IfcOpenShell `selector` queries in `list_elements`.
+  [All releases](https://github.com/Show2Instruct/bonsai-mcp/releases).
+- **[2026-07]** **Bonsai MCP is public,** with a
+  [documentation site](https://show2instruct.github.io/bonsai-mcp/): a lighter,
+  code-generation-first rewrite of our earlier
+  [ifc-bonsai-mcp](https://github.com/Show2Instruct/ifc-bonsai-mcp) server.
+- **[2025-11]** **MCP4IFC** paper released on
+  [arXiv](https://arxiv.org/abs/2511.05533), the study that motivated this
+  server.
+
+## Relation to `ifc-bonsai-mcp`
+
+This repository supersedes
+[ifc-bonsai-mcp](https://github.com/Show2Instruct/ifc-bonsai-mcp), which we
+used for the experiments in the [MCP4IFC paper](https://arxiv.org/abs/2511.05533)
+and which stays online for reproducibility.
+
+The original ships a large set of predefined tools. This one is built around
+code generation. Modern LLMs write IfcOpenShell code well, so a small set of
+guarded code tools covers more IFC tasks than any fixed tool list, and adapts
+to tasks we never anticipated. The code-generation workflow is reworked and
+simplified here, and the server is lightweight, quick to connect, and easy to
+use.
+
+**Use this repository** unless you need the original's fixed tools or the exact
+paper setup. It is the one we keep updated.
 
 ## Requirements
 
@@ -42,7 +78,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 point your MCP client at it below:
 
 ```bash
-git clone https://github.com/show2instruct/bonsai-mcp.git
+git clone https://github.com/Show2Instruct/bonsai-mcp.git
 ```
 
 ## Quick start
@@ -52,9 +88,11 @@ git clone https://github.com/show2instruct/bonsai-mcp.git
 1. In Blender: **Edit > Preferences > Add-ons**. On Blender 4.2+/5.x, open
    the **▾** menu (top-right) > **Install from Disk...**; on older versions
    use the **Install...** button.
-2. Pick **`blender_addon/bonsai_bridge.py`** from the repo you cloned: that
-   exact file, not `scripts/package_addon.py` or the `.zip`. Then tick
-   **Bonsai MCP Bridge** to enable it.
+2. Pick **`blender_addon/bonsai_bridge.py`** from the repo you cloned (that
+   exact file, not `scripts/package_addon.py`), or install the
+   `bonsai_mcp_bridge-X.Y.Z.zip` attached to the matching
+   [GitHub release](https://github.com/Show2Instruct/bonsai-mcp/releases)
+   the same way. Then tick **Bonsai MCP Bridge** to enable it.
 3. Open the sidebar (press **N**) > **Bonsai MCP** tab > **Start Bridge**.
    It now listens on `127.0.0.1:9878`.
 
@@ -109,13 +147,13 @@ path to your clone.
 
 ## Tools
 
-Eleven tools, each tagged `[QUERY]` (read-only) or `[EDIT]` (mutates state).
+Fourteen tools, each tagged `[QUERY]` (read-only) or `[EDIT]` (mutates state).
 
 | Category | Tool                      | Purpose                                                     |
 | -------- | ------------------------- | ----------------------------------------------------------- |
 | QUERY    | `get_scene_info`          | Scene summary plus an optional filtered object list (paged). |
 | QUERY    | `get_selected_objects`    | Per-object info for the current selection (capped).         |
-| QUERY    | `list_elements`           | IFC-backed elements filtered by class (inheritance-aware), name, or storey; paged. |
+| QUERY    | `list_elements`           | IFC-backed elements filtered by class (inheritance-aware), name, storey, or an IfcOpenShell `selector` query (properties, materials, attributes); paged. |
 | QUERY    | `get_psets`               | IFC property and quantity sets for one or many objects (paged batches). |
 | QUERY    | `get_viewport_screenshot` | Capture the viewport: `view` or `azimuth`/`elevation`, direction-aware `fit`, per-storey floor plans, shading incl. color-by-class, plus structured viewport state with depth. |
 | QUERY    | `get_ifc_project_info`    | Schema, counts, materials, classifications.                 |
@@ -123,7 +161,10 @@ Eleven tools, each tagged `[QUERY]` (read-only) or `[EDIT]` (mutates state).
 | QUERY    | `get_quantities`          | Quantity takeoff (areas, volumes, lengths) by class, optionally per storey. |
 | EDIT     | `execute_ifc_code`        | Run IfcOpenShell / Bonsai API code. `bpy` blocked.          |
 | EDIT     | `execute_blender_code`    | Run arbitrary Python with full `bpy` access.                |
-| EDIT     | `save_ifc_file`           | Save in place, save-as (guarded), and optional viewport reload. |
+| EDIT     | `refresh_view`            | Sync the scene after data-only IFC edits (names, psets); milliseconds, no disk I/O. |
+| EDIT     | `refresh_geometry`        | Rebuild geometry/placement for specific elements; targeted, no disk I/O. |
+| EDIT     | `reload_project`          | Full scene rebuild from the in-memory model (slow, explicit escape hatch). |
+| EDIT     | `save_ifc_file`           | Write the model to disk: in place or save-as (guarded). Durability only. |
 
 Every tool returns structured content alongside readable JSON text, and
 the server also exposes MCP resources (`bonsai://project`,
@@ -145,25 +186,34 @@ REPL on your machine and never expose it to a network. See
 
 ## Documentation
 
+Rendered site: [show2instruct.github.io/bonsai-mcp](https://show2instruct.github.io/bonsai-mcp/)
+
 - [Installation](docs/installation.md)
 - [Client setup](docs/clients.md) (Claude, Cursor, VS Code, OpenAI)
 - [Tools reference](docs/tools.md)
+- [Example prompts](docs/examples.md)
+- [CLI reference](docs/cli.md)
 - [Safety](docs/safety.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
+The changelog can be found on the
+[GitHub Releases page](https://github.com/Show2Instruct/bonsai-mcp/releases).
+
 ## Contributing
 
-Python 3.10+ and `uv`:
+See [CONTRIBUTING.md](CONTRIBUTING.md). Short version, with Python 3.10+
+and `uv`:
 
 ```bash
 uv venv
 uv pip install -e ".[dev]"
-uv run ruff check src tests blender_addon scripts
-uv run pytest
+uv run python -m ruff check src tests blender_addon scripts
+uv run python -m pytest
 ```
 
 Add tests and docs for behavior changes. Report security issues privately
-through [GitHub Security Advisories](https://github.com/show2instruct/bonsai-mcp/security/advisories/new).
+through [GitHub Security Advisories](https://github.com/Show2Instruct/bonsai-mcp/security/advisories/new)
+(see [SECURITY.md](SECURITY.md)).
 
 ## License
 

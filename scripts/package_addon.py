@@ -32,6 +32,11 @@ def main() -> int:
         default=str(REPO_ROOT / "dist"),
         help="Output directory (default: dist/).",
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Fail (exit 1) when the add-on and package versions disagree.",
+    )
     args = parser.parse_args()
 
     source = ADDON_FILE.read_text(encoding="utf-8")
@@ -39,10 +44,14 @@ def main() -> int:
 
     pkg_version = package_version()
     if pkg_version and pkg_version != version:
-        print(
-            f"WARNING: add-on version {version} != package version {pkg_version}. "
+        message = (
+            f"add-on version {version} != package version {pkg_version}. "
             "Bump both before releasing."
         )
+        if args.check:
+            print(f"ERROR: {message}")
+            return 1
+        print(f"WARNING: {message}")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -52,7 +61,11 @@ def main() -> int:
         zf.write(ADDON_FILE, arcname="bonsai_bridge.py")
 
     print(f"Wrote {zip_path}")
-    print("Install in Blender: Edit > Preferences > Add-ons > Install... > pick this zip.")
+    print(
+        "Install in Blender: Edit > Preferences > Add-ons, then on 4.2+/5.x "
+        "open the top-right menu > 'Install from Disk...' (older versions: "
+        "the 'Install...' button) and pick this zip."
+    )
     return 0
 
 

@@ -6,14 +6,27 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    name: test (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: windows-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -25,6 +38,8 @@ jobs:
         run: uv pip install --system -e ".[dev]"
       - name: Lint (ruff)
         run: ruff check src tests blender_addon scripts
+      - name: Validate example configs
+        run: python -c "import json, pathlib; [json.loads(p.read_text()) for p in pathlib.Path('examples').glob('*.json')]"
       - name: Test (pytest)
         run: pytest
 
@@ -43,3 +58,16 @@ jobs:
           uv pip install --system "mcp==1.27.0"
       - name: Test against the dependency floor
         run: pytest
+
+  docs:
+    name: docs build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Build docs (strict)
+        run: uv run --extra docs mkdocs build --strict

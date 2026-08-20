@@ -28,7 +28,7 @@ from bpy.types import AddonPreferences, Operator, Panel
 bl_info = {
     "name": "Bonsai MCP Bridge",
     "author": "Show2Instruct",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar > Bonsai MCP",
     "description": "Localhost TCP bridge for the bonsai-mcp server.",
@@ -42,7 +42,16 @@ MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 # the queued request and reporting a timeout to the client.
 MAIN_THREAD_WAIT_SECONDS = 120.0
 # Commands that modify state; rejected when the "Allow edits" preference is off.
-_EDIT_COMMANDS = frozenset({"execute_code", "execute_ifc_code", "save_ifc_file"})
+_EDIT_COMMANDS = frozenset(
+    {
+        "execute_code",
+        "execute_ifc_code",
+        "save_ifc_file",
+        "refresh_view",
+        "refresh_geometry",
+        "reload_project",
+    }
+)
 _ACTIVITY_LOG_SIZE = 5
 _STATE: dict[str, object] = {
     "server": None,
@@ -422,6 +431,11 @@ def _matching_objects(objects, params) -> list:
     raise ValueError(f"Unknown query: {query!r}")
 
 
+# Cap on the selected-object name list in the scene summary; a box-select can
+# grab thousands of objects and the full list would bloat every summary frame.
+_SCENE_SELECTED_NAMES_CAP = 50
+
+
 def _h_get_scene_info(params):
     scene = bpy.context.scene
     objects = list(scene.objects)
@@ -437,7 +451,8 @@ def _h_get_scene_info(params):
         "scene_name": scene.name,
         "object_count": len(objects),
         "selected_count": len(selected),
-        "selected_objects": selected,
+        "selected_objects": selected[:_SCENE_SELECTED_NAMES_CAP],
+        "selected_objects_truncated": len(selected) > _SCENE_SELECTED_NAMES_CAP,
         "collections": collections,
         "object_type_counts": object_type_counts,
         "ifc_available": _get_loaded_ifc() is not None,
@@ -1370,14 +1385,52 @@ def _element_ids_in_storey(key: str) -> set:
     return _contained_element_ids(storey)
 
 
+_SELECTOR_CHEAT_SHEET = (
+    "Selector examples: 'IfcWall' (one class), 'IfcWall, IfcSlab' (union), "
+    "'IfcWall, material=concrete', 'IfcWall, Pset_WallCommon.FireRating=F30' "
+    "(property value), 'IfcElement, Name=/W.*1/' (regex on an attribute). "
+    "This is ifcopenshell.util.selector syntax."
+)
+
+
+def _selector_element_ids(selector: str) -> set:
+    """Resolve an IfcOpenShell selector query to a set of element ids."""
+    ifc = _get_loaded_ifc()
+    if ifc is None:
+        raise RuntimeError(
+            "No IFC project appears to be loaded. Open an IFC file in Bonsai first."
+        )
+    try:
+        import ifcopenshell.util.selector as selector_util  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "ifcopenshell.util.selector is not available in this Blender "
+            "environment; update Bonsai/IfcOpenShell to use the 'selector' "
+            "filter, or filter by ifc_class/name_contains instead."
+        ) from exc
+    try:
+        elements = selector_util.filter_elements(ifc, selector)
+    except Exception as exc:
+        raise ValueError(
+            f"Invalid selector {selector!r}: {exc}. {_SELECTOR_CHEAT_SHEET}"
+        ) from exc
+    ids: set = set()
+    for element in elements:
+        with contextlib.suppress(Exception):
+            ids.add(element.id())
+    return ids
+
+
 def _h_list_elements(params):
-    """List IFC-backed objects with class/name/storey filters and paging."""
+    """List IFC-backed objects with class/name/storey/selector filters and paging."""
     params = params or {}
     ifc_class = params.get("ifc_class") or None
     name_contains = (params.get("name_contains") or "").strip().lower() or None
     storey_key = params.get("storey") or None
+    selector = (params.get("selector") or "").strip() or None
 
     storey_ids = _element_ids_in_storey(storey_key) if storey_key else None
+    selector_ids = _selector_element_ids(selector) if selector else None
 
     matches = []
     for obj in bpy.context.scene.objects:
@@ -1395,6 +1448,12 @@ def _h_list_elements(params):
         if storey_ids is not None:
             try:
                 if element.id() not in storey_ids:
+                    continue
+            except Exception:
+                continue
+        if selector_ids is not None:
+            try:
+                if element.id() not in selector_ids:
                     continue
             except Exception:
                 continue
@@ -1670,6 +1729,226 @@ def _h_save_ifc_file(params):
     }
 
 
+_REFRESH_MAX_TARGETS = 200
+
+
+def _blender_name_for_element(tool_mod, element) -> str:
+    """Bonsai's object-name convention for an element ('IfcClass/Name')."""
+    with contextlib.suppress(Exception):
+        return tool_mod.Loader.get_name(element)
+    name = getattr(element, "Name", None) or "Unnamed"
+    return f"{element.is_a()}/{name}"
+
+
+def _refresh_targets(params) -> list[str]:
+    global_ids = list((params or {}).get("global_ids") or [])
+    if not global_ids:
+        raise ValueError("'global_ids' is required: pass the GlobalIds of the edited elements.")
+    if len(global_ids) > _REFRESH_MAX_TARGETS:
+        raise ValueError(
+            f"Too many targets ({len(global_ids)} > {_REFRESH_MAX_TARGETS}). "
+            "Refresh in batches, or use reload_project if most of the model changed."
+        )
+    return global_ids
+
+
+def _require_bonsai_and_ifc():
+    """Return (tool module, ifc file); refresh needs both."""
+    tool_mod = _get_bonsai_tool()
+    if tool_mod is None:
+        raise RuntimeError("Bonsai (bonsai.tool) is not available; cannot refresh the scene.")
+    ifc = _get_loaded_ifc()
+    if ifc is None:
+        raise RuntimeError(
+            "No IFC project appears to be loaded. Open an IFC file in Bonsai first."
+        )
+    return tool_mod, ifc
+
+
+def _sync_object_placement(tool_mod, ifc, element, obj) -> bool:
+    """Set obj.matrix_world from the element's IFC placement. True on success."""
+    try:
+        import ifcopenshell.util.placement as placement_util  # type: ignore
+        import ifcopenshell.util.unit as unit_util  # type: ignore
+
+        placement = getattr(element, "ObjectPlacement", None)
+        if placement is None:
+            return False
+        matrix = placement_util.get_local_placement(placement).copy()
+        matrix[:3, 3] *= unit_util.calculate_unit_scale(ifc)
+        obj.matrix_world = tool_mod.Loader.apply_blender_offset_to_matrix_world(obj, matrix)
+        return True
+    except Exception:
+        return False
+
+
+def _h_refresh_view(params):
+    """Tier 1: sync names after data-only IFC edits. No geometry, no disk I/O."""
+    global_ids = _refresh_targets(params)
+    tool_mod, ifc = _require_bonsai_and_ifc()
+
+    results: list[dict] = []
+    for gid in global_ids:
+        entry: dict = {"global_id": gid}
+        try:
+            element = ifc.by_guid(gid)
+        except Exception:
+            entry["error"] = (
+                "No element with this GlobalId in the loaded IFC. If you deleted "
+                "it, use reload_project to remove its object from the scene."
+            )
+            results.append(entry)
+            continue
+        obj = None
+        with contextlib.suppress(Exception):
+            obj = tool_mod.Ifc.get_object(element)
+        if obj is None:
+            entry["error"] = (
+                "The element has no Blender object yet (newly created?). "
+                "reload_project materializes new elements."
+            )
+            results.append(entry)
+            continue
+        new_name = _blender_name_for_element(tool_mod, element)
+        entry["object"] = obj.name
+        if obj.name != new_name:
+            obj.name = new_name
+            entry["object"] = new_name
+            entry["renamed"] = True
+        results.append(entry)
+
+    return {
+        "refreshed": sum(1 for r in results if "error" not in r),
+        "results": results,
+        "note": (
+            "Data-only sync (names). Nothing was written to disk; edits stay "
+            "in memory until the project is saved."
+        ),
+    }
+
+
+def _h_refresh_geometry(params):
+    """Tier 2: rebuild geometry and placement for specific elements. No disk I/O."""
+    global_ids = _refresh_targets(params)
+    tool_mod, ifc = _require_bonsai_and_ifc()
+
+    results: list[dict] = []
+    to_reload = []
+    for gid in global_ids:
+        entry: dict = {"global_id": gid}
+        try:
+            element = ifc.by_guid(gid)
+        except Exception:
+            entry["error"] = (
+                "No element with this GlobalId in the loaded IFC. If you deleted "
+                "it, use reload_project to remove its object from the scene."
+            )
+            results.append(entry)
+            continue
+        obj = None
+        with contextlib.suppress(Exception):
+            obj = tool_mod.Ifc.get_object(element)
+        if obj is None:
+            entry["error"] = (
+                "The element has no Blender object yet (newly created?). "
+                "reload_project materializes new elements."
+            )
+            results.append(entry)
+            continue
+        entry["object"] = obj.name
+        entry["placement_synced"] = _sync_object_placement(tool_mod, ifc, element, obj)
+        with contextlib.suppress(Exception):
+            new_name = _blender_name_for_element(tool_mod, element)
+            if obj.name != new_name:
+                obj.name = new_name
+                entry["object"] = new_name
+        to_reload.append(obj)
+        results.append(entry)
+
+    representations_reloaded = False
+    if to_reload:
+        try:
+            tool_mod.Geometry.reload_representation(to_reload)
+            representations_reloaded = True
+        except Exception as exc:
+            for entry in results:
+                if "error" not in entry:
+                    entry["representation_error"] = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "refreshed": sum(1 for r in results if "error" not in r),
+        "representations_reloaded": representations_reloaded,
+        "results": results,
+        "note": (
+            "Targeted geometry rebuild. Nothing was written to disk; edits stay "
+            "in memory until the project is saved."
+        ),
+    }
+
+
+def _restore_project_path(path: str) -> bool:
+    """Point Bonsai's project path back at `path` (after a temp-file reload)."""
+    import importlib
+
+    restored = False
+    for mod_name in ("bonsai.bim.ifc", "blenderbim.bim.ifc"):
+        with contextlib.suppress(Exception):
+            importlib.import_module(mod_name).IfcStore.path = path
+            restored = True
+            break
+    with contextlib.suppress(Exception):
+        bpy.context.scene.BIMProperties.ifc_file = path  # type: ignore[attr-defined]
+    return restored
+
+
+def _reload_temp_path(original: str) -> str:
+    """A temp path for reload_project, reused across calls, cleaned on stop."""
+    tmp_dir = _STATE.get("reload_dir")
+    if not isinstance(tmp_dir, str):
+        import tempfile
+
+        tmp_dir = tempfile.mkdtemp(prefix="bonsai_mcp_reload_")
+        _STATE["reload_dir"] = tmp_dir
+    return os.path.join(tmp_dir, os.path.basename(original) or "project.ifc")
+
+
+def _h_reload_project(_params):
+    """Tier 3: rebuild the whole scene from the in-memory model.
+
+    Saves to a temp file and reloads from it, then restores the project path,
+    so the user's file on disk is never touched and Ctrl+S still saves to it.
+    """
+    tool_mod = _get_bonsai_tool()
+    if tool_mod is None:
+        raise RuntimeError("Bonsai is not available; cannot reload the project.")
+    original = _bonsai_project_path()
+    if not original:
+        raise RuntimeError(
+            "The project has no file path yet (it was never saved). Save it "
+            "once in Blender (or via save_ifc_file with output_path) first."
+        )
+    tmp_path = _reload_temp_path(original)
+    _save_ifc_project(tmp_path)
+    _reload_ifc_project(tmp_path)
+    path_restored = _restore_project_path(original)
+    return {
+        "reloaded": True,
+        "project_path": original,
+        "path_restored": path_restored,
+        "note": (
+            "Scene rebuilt from the in-memory model via a temporary file. The "
+            "project file on disk was not modified; saving still targets "
+            f"{original}."
+        ),
+    }
+
+
+def _cleanup_reload_dir() -> None:
+    tmp = _STATE.pop("reload_dir", None)
+    if isinstance(tmp, str):
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 _HANDLERS = {
     "ping": _h_ping,
     "get_scene_info": _h_get_scene_info,
@@ -1683,6 +1962,9 @@ _HANDLERS = {
     "get_quantities": _h_get_quantities,
     "get_psets": _h_get_psets,
     "save_ifc_file": _h_save_ifc_file,
+    "refresh_view": _h_refresh_view,
+    "refresh_geometry": _h_refresh_geometry,
+    "reload_project": _h_reload_project,
 }
 
 class _PendingRequest:
@@ -1731,8 +2013,18 @@ def _record_activity(pending: _PendingRequest, duration_s: float) -> None:
     _STATE["last_command"] = pending.command
     log = _STATE.get("activity")
     if isinstance(log, collections.deque):
-        outcome = "error" if pending.error else "ok"
-        log.appendleft(f"{pending.command}: {outcome} ({duration_s * 1000.0:.0f} ms)")
+        stamp = time.strftime("%H:%M:%S")
+        outcome = "err" if pending.error else "ok"
+        log.appendleft(f"{stamp} {outcome} {pending.command} {duration_s * 1000.0:.0f}ms")
+
+
+def _redraw_view3d_areas() -> None:
+    """Repaint 3D viewports so the panel's counters update without mouse-over."""
+    with contextlib.suppress(Exception):
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == "VIEW_3D":
+                    area.tag_redraw()
 
 
 def _drain_queue() -> float | None:
@@ -1778,6 +2070,8 @@ def _drain_queue() -> float | None:
             pending.finished = True
             pending.done.set()
             _record_activity(pending, time.perf_counter() - started)
+    if drained:
+        _redraw_view3d_areas()
     return 0.05
 
 
@@ -2056,6 +2350,7 @@ def _stop_server() -> None:
         # requests queued but never run must not leave clients waiting
         _flush_queue("bridge stopped before the request could run")
         _cleanup_screenshot_dir()
+        _cleanup_reload_dir()
         print("[bonsai-mcp-bridge] stopped")
 
 class BONSAI_MCP_AddonPrefs(AddonPreferences):
@@ -2182,6 +2477,8 @@ class BONSAI_MCP_PT_Panel(Panel):
             col.label(text=f"Listening on {bound[0]}:{bound[1]}")
         else:
             col.label(text=f"Bind: {prefs.host}:{prefs.port}")
+        if running and _STATE.get("token"):
+            col.label(text="Token required by clients", icon="LOCKED")
         last_error = _STATE.get("last_error")
         if last_error:
             col.label(text=str(last_error), icon="ERROR")
@@ -2197,15 +2494,15 @@ class BONSAI_MCP_PT_Panel(Panel):
         col.separator()
 
         col.prop(prefs, "allow_edits")
-        if not prefs.allow_edits:
+        if prefs.allow_edits:
+            warn = col.row()
+            warn.alert = True
+            warn.label(text="Edits on: AI can modify the model.", icon="UNLOCKED")
+        else:
             col.label(text="Read-only: EDIT tools are blocked.", icon="LOCKED")
 
         if running:
             col.separator()
-            col.label(text=f"Requests served: {_STATE.get('requests_served', 0)}")
-            last_command = _STATE.get("last_command")
-            if last_command:
-                col.label(text=f"Last: {last_command}")
             activity = _STATE.get("activity")
             if isinstance(activity, collections.deque) and activity:
                 col.label(text="Recent:")

@@ -1,4 +1,4 @@
-"""Benchmark harness for the Blender bridge (roadmap 4.6).
+"""Benchmark harness for the Blender bridge.
 
 Times the hot query paths against a LIVE Blender + Bonsai session with a
 model loaded, so perf claims in release notes come from measurements, not
@@ -49,6 +49,13 @@ def main() -> int:
     args = parser.parse_args()
 
     client = BlenderBridgeClient(timeout=args.timeout)
+    try:
+        return _run_benchmarks(client, args)
+    finally:
+        client.close()
+
+
+def _run_benchmarks(client: BlenderBridgeClient, args: argparse.Namespace) -> int:
     try:
         info = client.ping()
     except BlenderBridgeError as exc:

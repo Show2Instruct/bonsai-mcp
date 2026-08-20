@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest an idea or improvement for Bonsai MCP
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: The use case or pain point behind the request.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What you would like to see. A new tool? A new option on an existing tool?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional.
+    validations:
+      required: false

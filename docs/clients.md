@@ -9,7 +9,7 @@ uv run --directory /path/to/bonsai-mcp bonsai-mcp
 ```
 
 Replace `/path/to/bonsai-mcp` everywhere below with the folder you cloned
-(`git clone https://github.com/show2instruct/bonsai-mcp.git`). `uv` builds
+(`git clone https://github.com/Show2Instruct/bonsai-mcp.git`). `uv` builds
 the project into that repo's `.venv` on first launch (editable, so local
 edits take effect on the next restart) and caches it after that. On Windows
 in JSON, use forward slashes or double every backslash

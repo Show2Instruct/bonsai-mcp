@@ -118,6 +118,9 @@ _DISPATCH_CASES = {
     "execute_ifc_code": ({"code": "print(1)"}, "execute_ifc_code"),
     "execute_blender_code": ({"code": "print(1)"}, "execute_code"),
     "save_ifc_file": ({"output_path": "/tmp/out.ifc"}, "save_ifc_file"),
+    "refresh_view": ({"global_ids": ["AAAA"]}, "refresh_view"),
+    "refresh_geometry": ({"global_ids": ["AAAA"]}, "refresh_geometry"),
+    "reload_project": ({}, "reload_project"),
 }
 
 

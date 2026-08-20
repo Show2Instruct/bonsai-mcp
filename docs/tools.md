@@ -1,11 +1,11 @@
 # Tools reference
 
-Bonsai MCP exposes eleven tools, split into two categories:
+Bonsai MCP exposes fourteen tools, split into two categories:
 
 | Category | Behaviour | Tools |
 | --- | --- | --- |
 | **QUERY** | Read-only. Safe to call without confirmation. | `get_scene_info`, `get_selected_objects`, `list_elements`, `get_psets`, `get_viewport_screenshot`, `get_ifc_project_info`, `get_spatial_structure`, `get_quantities` |
-| **EDIT** | Mutates Blender state, the IFC model, or the filesystem. | `execute_ifc_code`, `execute_blender_code`, `save_ifc_file` |
+| **EDIT** | Mutates Blender state, the IFC model, or the filesystem. | `execute_ifc_code`, `execute_blender_code`, `save_ifc_file`, `refresh_view`, `refresh_geometry`, `reload_project` |
 
 The category is encoded in two places:
 
@@ -23,6 +23,12 @@ with, so schema and behaviour cannot drift apart.
 List-shaped results are paged: pass `limit`/`offset` where offered and
 watch the `total`/`truncated` flags instead of requesting everything at
 once.
+
+Errors follow one convention: every failure states what went wrong and
+what to do next (for example, the read-only refusal names the exact
+Blender panel toggle to flip, and an invalid `selector` query returns a
+syntax cheat sheet). Clients and models should follow the instruction in
+the error instead of retrying the same call.
 
 Two code execution tools live in the EDIT category: `execute_ifc_code`
 (preferred, IFC-only, `bpy` blocked) and `execute_blender_code` (full `bpy`
@@ -133,6 +139,7 @@ Inputs (all optional):
   "ifc_class": "IfcWall",
   "name_contains": "kitchen",
   "storey": "Level 1",
+  "selector": "IfcWall, Pset_WallCommon.FireRating=F30",
   "limit": 200,
   "offset": 0
 }
@@ -143,6 +150,7 @@ Inputs (all optional):
 | `ifc_class` | Inheritance-aware: `IfcWall` also matches `IfcWallStandardCase`. |
 | `name_contains` | Case-insensitive substring match on the Blender object name. |
 | `storey` | Name or GlobalId of an `IfcBuildingStorey`. Elements inside the storey's spaces count as in the storey. |
+| `selector` | Optional IfcOpenShell selector query, applied on top of the other filters. Examples: `IfcWall, material=concrete`, `IfcWall, Pset_WallCommon.FireRating=F30`, `IfcElement, Name=/W.*1/` (regex). Uses `ifcopenshell.util.selector` syntax; an invalid query returns an error with a short cheat sheet. |
 | `limit` / `offset` | Paging, 1-1000 per page (default 200). |
 
 Returns:
@@ -475,13 +483,18 @@ Pre-injected namespace (no imports needed):
 | `tool` | `bonsai.tool` module (or `None` if unavailable) |
 | `get_ifc_file()` | Returns the loaded IFC file, raising a clear error if none is open |
 | `get_default_container()` | Returns the active spatial container (e.g. the active storey) |
-| `save_and_load_ifc(path=None)` | Saves the project (to its own file by default) and reloads it |
+| `save_and_load_ifc(path=None)` | Legacy helper (save then full reload); prefer the refresh tools |
 
 **Viewport sync:** edits made here change the in-memory IFC model but do
-*not* appear in the Blender viewport until the project is reloaded. After a
-batch of edits, call `save_and_load_ifc()` (or use `save_ifc_file` with
-`reload=true`). Reload once per batch, not per edit; it rebuilds the whole
-scene.
+*not* appear in the Blender viewport until refreshed. Pick the cheapest
+tier for what the edit touched: [`refresh_view`](#refresh_view-edit) after
+data-only edits (names, psets, classifications),
+[`refresh_geometry`](#refresh_geometry-edit) after moving elements or
+changing representations, [`reload_project`](#reload_project-edit) after
+creating or deleting elements. Do not save just to make edits visible;
+saving is a separate, durability-only step.
+
+MCP edits are outside Blender's undo stack: Ctrl+Z will not revert them.
 
 Inputs:
 
@@ -549,7 +562,75 @@ traceback.
 when truncation occurs, the corresponding `_truncated` flag is `true` and
 `_bytes` reports the original size before trimming.
 
+## `refresh_view` (EDIT)
+
+Syncs the Blender scene after **data-only** IFC edits: names, descriptions,
+psets, quantities, classifications. Sub-millisecond per element even on
+million-entity models. Does not write to disk. Does not rebuild geometry.
+
+Inputs:
+
+```json
+{ "global_ids": ["2O2Fr$t4X7Zf8NOew3FK6X"] }
+```
+
+Returns per-element results (`refreshed` counts successes; elements that
+were deleted or have no Blender object yet get an `error` entry pointing at
+`reload_project`):
+
+```json
+{
+  "refreshed": 1,
+  "results": [
+    { "global_id": "2O2Fr$t4X7Zf8NOew3FK6X", "object": "IfcWall/NewName", "renamed": true }
+  ],
+  "note": "Data-only sync (names). Nothing was written to disk; ..."
+}
+```
+
+## `refresh_geometry` (EDIT)
+
+Rebuilds Blender geometry and placement for **specific** elements after
+geometric IFC edits: moved elements (changed `ObjectPlacement`) or changed
+representations. Fast and targeted; does not write to disk; the rest of
+the scene (selection, visibility, camera) is untouched.
+
+Not covered: newly created and deleted elements; use
+[`reload_project`](#reload_project-edit) for those.
+
+Inputs:
+
+```json
+{ "global_ids": ["2O2Fr$t4X7Zf8NOew3FK6X"] }
+```
+
+Returns per-element results with `placement_synced` flags and a
+`representations_reloaded` summary flag.
+
+## `reload_project` (EDIT)
+
+Full scene rebuild from the **in-memory** IFC model. The model is written
+to a temporary file and reloaded from it; the project file on disk is not
+modified, and the project path is restored afterwards so saving (Ctrl+S or
+`save_ifc_file`) still targets the user's file.
+
+**Slow**: seconds to minutes on large models, and it resets selection,
+visibility, and camera. Use only when targeted refresh is insufficient:
+after creating or deleting elements, or when the scene has genuinely
+diverged.
+
+Takes no inputs. Returns:
+
+```json
+{ "reloaded": true, "project_path": "C:/models/house.ifc", "path_restored": true }
+```
+
 ## `save_ifc_file` (EDIT)
+
+Writes the IFC model to disk. **Durability only**: call it when the user
+asks to save. It does not refresh the viewport; use the refresh tools for
+visibility. The user pressing Ctrl+S in Blender is equivalent to the
+in-place mode.
 
 Inputs (all optional):
 
@@ -567,9 +648,8 @@ Two modes:
   overwrite an existing file unless `overwrite=true`; the parent directory
   must already exist. The project keeps pointing at its original file.
 
-With `reload=true`, the project is reloaded from the saved file afterwards,
-clearing and rebuilding the Blender scene so IFC-level edits made via
-`execute_ifc_code` become visible in the viewport.
+`reload=true` is a legacy flag that reloads the project from the saved file
+afterwards; prefer `reload_project`, which does not require saving first.
 
 Returns:
 

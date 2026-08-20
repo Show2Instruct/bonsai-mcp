@@ -38,6 +38,7 @@ from bonsai_mcp.schemas import (
     GetSelectedObjectsInput,
     GetSpatialStructureInput,
     ListElementsInput,
+    RefreshInput,
     SaveIfcInput,
     ViewportScreenshotInput,
     input_schema_for,
@@ -56,6 +57,9 @@ from bonsai_mcp.tools import (
     TOOL_GET_SPATIAL_STRUCTURE,
     TOOL_GET_VIEWPORT_SCREENSHOT,
     TOOL_LIST_ELEMENTS,
+    TOOL_REFRESH_GEOMETRY,
+    TOOL_REFRESH_VIEW,
+    TOOL_RELOAD_PROJECT,
     TOOL_SAVE_IFC_FILE,
     ToolError,
     _as_json,
@@ -69,6 +73,9 @@ from bonsai_mcp.tools import (
     tool_get_spatial_structure,
     tool_get_viewport_screenshot,
     tool_list_elements,
+    tool_refresh_geometry,
+    tool_refresh_view,
+    tool_reload_project,
     tool_save_ifc_file,
 )
 
@@ -165,10 +172,13 @@ _TOOL_SPECS: tuple[tuple[str, str, str, type[BaseModel], str, dict[str, Any], bo
         (
             "List IFC-backed elements in the scene with structured filters: "
             "`ifc_class` (inheritance-aware, so 'IfcWall' matches "
-            "IfcWallStandardCase), `name_contains`, and `storey` (Name or "
-            "GlobalId of an IfcBuildingStorey). Paged via limit/offset with "
-            "total/truncated reported. Prefer this over get_scene_info "
-            "queries for element listings."
+            "IfcWallStandardCase), `name_contains`, `storey` (Name or "
+            "GlobalId of an IfcBuildingStorey), and `selector` (an "
+            "IfcOpenShell selector query, e.g. "
+            "'IfcWall, Pset_WallCommon.FireRating=F30', for property/"
+            "material/attribute filters without code execution). Paged via "
+            "limit/offset with total/truncated reported. Prefer this over "
+            "get_scene_info queries for element listings."
         ),
         _output_schema(
             "Matching element summaries.",
@@ -315,10 +325,13 @@ _TOOL_SPECS: tuple[tuple[str, str, str, type[BaseModel], str, dict[str, Any], bo
             "`element_util` (ifcopenshell.util.element), "
             "`tool` (bonsai.tool). Pre-injected helper functions: "
             "`get_ifc_file()` (loaded IFC file or raises), "
-            "`get_default_container()` (active spatial container), "
-            "`save_and_load_ifc(path=None)` (save the project and reload "
-            "it; call this after IFC edits to make them visible in the "
-            "viewport, since edits do NOT appear until the project is reloaded). "
+            "`get_default_container()` (active spatial container). "
+            "Edits are not visible in the viewport until refreshed: after "
+            "attribute/pset/classification edits call refresh_view with the "
+            "affected GlobalIds; after moving elements or changing "
+            "representations call refresh_geometry; after creating or "
+            "deleting elements call reload_project. Do NOT call "
+            "save_ifc_file just to make edits visible. "
             "Use this for: querying IFC entities, reading/writing "
             "properties, traversing the IFC model, calling "
             "ifcopenshell.api operations, and any BIM data work."
@@ -342,18 +355,82 @@ _TOOL_SPECS: tuple[tuple[str, str, str, type[BaseModel], str, dict[str, Any], bo
         False,
     ),
     (
+        TOOL_REFRESH_VIEW,
+        "Refresh View",
+        "EDIT",
+        RefreshInput,
+        (
+            "Sync the Blender scene after DATA-ONLY IFC edits (names, "
+            "descriptions, psets, quantities, classifications). Pass the "
+            "GlobalIds of the edited elements. Milliseconds even on large "
+            "models. Does not write to disk. Does not rebuild geometry. "
+            "This is the right tool after execute_ifc_code attribute or "
+            "pset edits; never save just to refresh."
+        ),
+        _output_schema(
+            "Per-element sync outcome.",
+            {"refreshed": {"type": "integer"}, "results": {"type": "array"}},
+        ),
+        True,
+    ),
+    (
+        TOOL_REFRESH_GEOMETRY,
+        "Refresh Geometry",
+        "EDIT",
+        RefreshInput,
+        (
+            "Rebuild Blender geometry and placement for SPECIFIC elements "
+            "after geometric IFC edits (moved elements, changed "
+            "representations). Pass the affected GlobalIds. Fast and "
+            "targeted; does not write to disk; does not touch the rest of "
+            "the scene. Newly created or deleted elements are NOT covered: "
+            "use reload_project for those."
+        ),
+        _output_schema(
+            "Per-element rebuild outcome.",
+            {"refreshed": {"type": "integer"}, "results": {"type": "array"}},
+        ),
+        True,
+    ),
+    (
+        TOOL_RELOAD_PROJECT,
+        "Reload Project",
+        "EDIT",
+        _EmptyInput,
+        (
+            "Full scene rebuild from the in-memory IFC model (via a "
+            "temporary file; the project file on disk is not modified and "
+            "the project path is preserved). SLOW: seconds to minutes on "
+            "large models, and it resets selection, visibility, and camera. "
+            "Use only when targeted refresh is insufficient: after creating "
+            "or deleting elements, or when the scene has genuinely "
+            "diverged. Prefer refresh_view / refresh_geometry otherwise."
+        ),
+        _output_schema(
+            "Reload outcome.",
+            {
+                "reloaded": {"type": "boolean"},
+                "project_path": {"type": "string"},
+                "path_restored": {"type": "boolean"},
+            },
+        ),
+        True,
+    ),
+    (
         TOOL_SAVE_IFC_FILE,
         "Save IFC File",
         "EDIT",
         SaveIfcInput,
         (
-            "Save the loaded IFC model. With no arguments it saves the "
-            "project back to its own file (in-place, like File > Save IFC). "
-            "Pass `output_path` for a save-as; that refuses to overwrite "
-            "existing files unless `overwrite=true`. Pass `reload=true` to "
-            "reload the project from the saved file afterwards, which "
-            "rebuilds the Blender scene so IFC-level edits become visible "
-            "in the viewport."
+            "Write the IFC model to disk. Call only when the user "
+            "explicitly asks to save; it does NOT refresh the viewport "
+            "(use refresh_view / refresh_geometry / reload_project for "
+            "that). With no arguments it saves the project back to its own "
+            "file (in-place, like File > Save IFC). Pass `output_path` for "
+            "a save-as; that refuses to overwrite existing files unless "
+            "`overwrite=true`. The legacy `reload=true` flag reloads the "
+            "scene from the saved file afterwards; prefer reload_project, "
+            "which does not require saving first."
         ),
         _output_schema(
             "Save outcome.",
@@ -400,13 +477,15 @@ You are connected to a Blender + Bonsai (BlenderBIM) session via Bonsai MCP.
   `list_elements`, `get_psets`, `get_viewport_screenshot`,
   `get_ifc_project_info`, `get_spatial_structure`, `get_quantities`.
 - [EDIT] tools (modify state): `execute_ifc_code`, `execute_blender_code`,
-  `save_ifc_file`.
+  `save_ifc_file`, `refresh_view`, `refresh_geometry`, `reload_project`.
 
 Reach for QUERY tools first; only use EDIT tools when the user has asked
 for a change. Typical BIM questions are answerable without code:
 `get_spatial_structure` for "what is in this building, storey by storey",
 `get_quantities` for areas/volumes takeoffs, `list_elements` for filtered
-element lists, `get_psets` for properties.
+element lists (including property/material filters via its `selector`
+parameter, e.g. 'IfcWall, Pset_WallCommon.FireRating=F30'), `get_psets`
+for properties.
 
 Large result sets are paged: pass `limit`/`offset` and watch the
 `total`/`truncated` flags instead of requesting everything at once.
@@ -442,29 +521,40 @@ and restart the bridge.
 - `tool`: bonsai.tool module (Bonsai's internal API, or None)
 - `get_ifc_file()`: return the loaded IFC file, raising if none is open
 - `get_default_container()`: return the active spatial container
-- `save_and_load_ifc(path=None)`: save the project (to its own file by
-  default) and reload it, rebuilding the Blender scene
+- `save_and_load_ifc(path=None)`: legacy helper (save then full reload);
+  prefer the refresh tools below
 
 The same three helper functions are also injected into execute_blender_code.
 
 bpy is blocked in execute_ifc_code. If code needs bpy, it belongs in
 execute_blender_code.
 
-## Viewport sync after IFC edits
+## Viewport sync after IFC edits: pick the cheapest tier
 
-Edits made through `execute_ifc_code` (ifcopenshell.api calls, attribute
-changes, new entities) modify the in-memory IFC model but do NOT appear in
-the Blender viewport until the project is reloaded. After completing a batch
-of IFC edits, call `save_and_load_ifc()` inside execute_ifc_code, or use
-`save_ifc_file` with `reload=true`. Do this once per batch, not per edit,
-because reloading clears and rebuilds the whole scene.
+Edits made through `execute_ifc_code` modify the in-memory IFC model but do
+NOT appear in the Blender viewport until refreshed. Route by what the edit
+touched, cheapest first:
 
-## Saving
+1. `refresh_view` (milliseconds): after data-only edits - names,
+   descriptions, psets, quantities, classifications. Pass the affected
+   GlobalIds.
+2. `refresh_geometry` (fast, targeted): after moving elements or changing
+   representations. Pass the affected GlobalIds.
+3. `reload_project` (SLOW: seconds to minutes on large models; resets
+   selection, visibility, and camera): after creating or deleting elements,
+   or when the scene has genuinely diverged. Never call it implicitly.
 
+NEVER call save_ifc_file just to make edits visible: refreshing and saving
+are decoupled. MCP edits are outside Blender's undo stack (Ctrl+Z will not
+revert them); warn the user before large destructive edits.
+
+## Saving (durability only)
+
+- Saving is for durability, not visibility. Call `save_ifc_file` when the
+  user asks to save; the user can also just press Ctrl+S in Blender.
 - `save_ifc_file` with no arguments: save the project to its own file.
 - `save_ifc_file` with `output_path`: save-as to a new location (refuses to
   overwrite unless `overwrite=true`).
-- Add `reload=true` to also refresh the viewport from the saved file.
 
 ## Screenshots
 
@@ -729,6 +819,9 @@ def _dispatch_tool(
         TOOL_EXECUTE_IFC_CODE: lambda: tool_execute_ifc_code(client, arguments),
         TOOL_EXECUTE_BLENDER_CODE: lambda: tool_execute_blender_code(client, arguments),
         TOOL_SAVE_IFC_FILE: lambda: tool_save_ifc_file(client, arguments),
+        TOOL_REFRESH_VIEW: lambda: tool_refresh_view(client, arguments),
+        TOOL_REFRESH_GEOMETRY: lambda: tool_refresh_geometry(client, arguments),
+        TOOL_RELOAD_PROJECT: lambda: tool_reload_project(client),
     }
     handler = handlers.get(name)
     if handler is None:

@@ -21,6 +21,9 @@ from bonsai_mcp.tools import (
     tool_get_spatial_structure,
     tool_get_viewport_screenshot,
     tool_list_elements,
+    tool_refresh_geometry,
+    tool_refresh_view,
+    tool_reload_project,
     tool_save_ifc_file,
 )
 from tests.conftest import FakeBlenderBridgeClient
@@ -142,9 +145,22 @@ class TestListElements:
             "ifc_class": "IfcWall",
             "name_contains": "w1",
             "storey": "Level 1",
+            "selector": None,
             "limit": 200,
             "offset": 0,
         }
+
+    def test_selector_passed_through(self):
+        client = FakeBlenderBridgeClient(
+            responses={
+                "list_elements": {"elements": [], "total": 0, "truncated": False}
+            }
+        )
+        tool_list_elements(
+            client, {"selector": "IfcWall, Pset_WallCommon.FireRating=F30"}
+        )
+        params = client.calls[-1][1]
+        assert params["selector"] == "IfcWall, Pset_WallCommon.FireRating=F30"
 
     def test_defaults(self):
         client = FakeBlenderBridgeClient(
@@ -160,6 +176,41 @@ class TestListElements:
         client = FakeBlenderBridgeClient(responses={"list_elements": "weird"})
         with pytest.raises(ToolError, match="unexpected list_elements payload"):
             tool_list_elements(client)
+
+
+class TestRefreshTools:
+    def test_refresh_view_passes_global_ids(self):
+        client = FakeBlenderBridgeClient(
+            responses={"refresh_view": {"refreshed": 1, "results": []}}
+        )
+        out = tool_refresh_view(client, {"global_ids": ["GID1"]})
+        assert client.calls[-1] == ("refresh_view", {"global_ids": ["GID1"]})
+        assert out["refreshed"] == 1
+
+    def test_refresh_geometry_passes_global_ids(self):
+        client = FakeBlenderBridgeClient(
+            responses={"refresh_geometry": {"refreshed": 2, "results": []}}
+        )
+        tool_refresh_geometry(client, {"global_ids": ["A", "B"]})
+        assert client.calls[-1] == ("refresh_geometry", {"global_ids": ["A", "B"]})
+
+    def test_refresh_requires_nonempty_global_ids(self):
+        client = FakeBlenderBridgeClient()
+        with pytest.raises(ValidationError):
+            tool_refresh_view(client, {})
+        with pytest.raises(ValidationError):
+            tool_refresh_geometry(client, {"global_ids": []})
+        with pytest.raises(ValidationError):
+            tool_refresh_view(client, {"global_ids": ["  "]})
+        assert client.calls == []
+
+    def test_reload_project(self):
+        client = FakeBlenderBridgeClient(
+            responses={"reload_project": {"reloaded": True, "project_path": "x.ifc"}}
+        )
+        out = tool_reload_project(client)
+        assert client.calls[-1] == ("reload_project", {})
+        assert out["reloaded"] is True
 
 
 class TestSpatialStructure:
